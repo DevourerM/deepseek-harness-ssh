@@ -1,0 +1,3 @@
+- insert:
+    - id: deepseek-harness-ssh
+      name: deepseek-harness-ssh

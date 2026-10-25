@@ -1,0 +1,27 @@
+{
+  "name": "deepseek-harness-ssh",
+  "version": "0.1.0",
+  "description": "SSH remote workspaces for DeepSeek Harness",
+  "type": "module",
+  "license": "MIT",
+  "author": "Snoyi Selew",
+  "repository": {"type": "git", "url": "git+https://github.com/DevourerM/deepseek-harness-ssh.git"},
+  "main": "lib/index.js",
+  "icon": "assets/ssh.svg",
+  "exports": {".": "./lib/index.js", "./client": "./lib/client.js", "./package.json": "./package.json", "./cordis.patch.yml": "./cordis.patch.yml"},
+  "files": ["lib", "assets", "cordis.patch.yml", "README.md", "LICENSE"],
+  "engines": {"node": ">=22"},
+  "dsh": {
+    "bundle": {"patch": "./cordis.patch.yml"},
+    "client": {"platform": "web", "inject": ["@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-ui-workspace", "@deepseek-ai/dsh-client-ui-settings"]}
+  },
+  "dependencies": {"ssh2": "1.17.0"},
+  "bundleDependencies": ["ssh2"],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:host": "node scripts/host-smoke.mjs",
+    "test:ui": "node scripts/ui-smoke.mjs",
+    "pack:plugin": "node scripts/build.mjs && node scripts/pack.mjs"
+  }
+}
