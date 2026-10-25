@@ -2,7 +2,9 @@
 
 DeepSeek Harness 的标准 SSH 插件。在新建工作区时选择本地或远程文件夹，通过 SSH 接管远端目录。提供独立连接配置、指纹确认、连接检查、SFTP 目录浏览、远端运行时安装、桌面内远程界面和连接管理。
 
-首版目标宿主 **DSH 0.2.1-rc.3**，本机 Windows，远端 **Linux / macOS + POSIX shell + Node.js ≥22 + npm**。远端需开放 SSH、启用 SFTP 与 TCP 转发；不需要向公网开放 DSH 端口。远端 Windows 暂不支持。测试覆盖与尚未验证的部分见 [验证记录](docs/VALIDATION.md)。
+![本地与远程工作区选择](docs/images/workspace-choice.png)
+
+首版目标宿主 **DSH 0.2.1-rc.3**，本机 Windows，远端 **Linux / macOS + POSIX shell + Node.js ≥22.12.0 + npm**。远端需开放 SSH、启用 SFTP 与 TCP 转发；不需要向公网开放 DSH 端口。远端 Windows 暂不支持。测试覆盖与尚未验证的部分见 [验证记录](docs/VALIDATION.md)。
 
 ## 在软件中安装
 
@@ -58,7 +60,7 @@ Host *
 
 选择主机，点击 **检查连接**，依次检查 SSH 认证、SFTP 主目录、远端 Node 与插件管理的 DSH 版本。SSH 成功但运行时缺失时，会分别说明。
 
-远端已有 Node ≥22 与 npm 后，点击 **安装远端 DSH 运行时… → 开始远端安装**。插件通过 SSH 在远端 `~/.dsh-ssh/runtime/0.2.1-rc.3` 安装固定版本 `@deepseek-ai/dsh@0.2.1-rc.3`，不改远端全局 npm 安装。首次需要远端能访问 npm，安装可能需要数分钟；界面可取消。
+远端已有 Node ≥22.12.0 与 npm 后，点击 **安装远端 DSH 运行时… → 开始远端安装**。插件通过 SSH 在远端 `~/.dsh-ssh/runtime/0.2.1-rc.3` 安装固定版本 `@deepseek-ai/dsh@0.2.1-rc.3`，不改远端全局 npm 安装。首次需要远端能访问 npm，安装可能需要数分钟；界面可取消。
 
 ## 创建与使用工作区
 
@@ -79,6 +81,7 @@ Host *
 - 远端工作区数据位于 `~/.dsh-ssh/workspaces/<目录 SHA256 前24位>/`，同一目录重连使用同一数据目录。远端运行时、工作区数据不会因本机卸载而删除。
 - 本机配置、指纹、最近目录位于插件数据目录；账号密码和带 token 的启动 URL 不写入这些文件。启动 token 仅在当前界面和进程内存中使用。
 - SSH 与远端 DSH 都只监听回环地址。远端 Host 增加指定本地隧道端口的 Host 信任，仍使用 DSH 原生启动 token、Cookie、Origin 校验和审批机制。
+- 本地 HTTP 网关通过 SSH 转发请求；为兼容桌面 `dsh-app://` 的跨站嵌入，仅将原生登录 Cookie 转为 `HttpOnly; SameSite=None; Secure; Partitioned`，由浏览器按顶层站点隔离。网关不保存/伪造登录 Cookie，不注入认证，其他站点和未登录请求仍需远端原生认证。要求支持分区 Cookie 的现代 Chromium（DSH 0.2.1-rc.3 的桌面浏览器）。
 - 同时最多连接 4 个远程工作区；断开会停止本插件启动的远端 Host，远端磁盘数据保留。网络中断后的进程回收依赖远端 SSH 会话 EOF / 信号传播；插件不能对远端突然断电提供进程回收保证。
 - 首版不支持远端 Windows、交互 MFA / keyboard-interactive、任意 OpenSSH 指令、端口转发规则编辑、X11、Agent 转发、会话在本地与远端之间迁移。
 - 远端原生插件需另行安装。涉及浏览器弹窗、原生桌面专属能力、Office 转换等依赖功能，以远端 DSH 与浏览器环境支持情况为准。
@@ -91,6 +94,7 @@ npm run build
 npm test
 npm run test:host
 npm run test:ui
+npm run test:install
 npm run pack:plugin
 ```
 

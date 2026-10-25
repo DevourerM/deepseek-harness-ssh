@@ -17,9 +17,11 @@
 5. 设置 SSH 栏、新建本地/远程窗口、目录浏览、远程视图、返回本地与重新连接。
 6. 真 SSH/SFTP/转发本地夹具测试，故障/主机指纹/路径注入测试；隔离真实 DSH Host 的安装和 UI 验证；生成可在软件安装的自包含 tgz。
 
+实现中发现桌面 `dsh-app://app` 与 HTTP 远端之间的跨站 Cookie 限制，增加回环 HTTP 网关：保留签名与 HttpOnly，仅将原生浏览器 Cookie 转为 Secure / SameSite=None / Partitioned，通过 Chromium 的站点分区兼容桌面嵌入；不在代理端注入或保存认证。已加入跨站浏览器测试及未登录、Origin、Host 拒绝验证。
+
 ## 范围与验收
 
-- 首版远端系统为 Linux/macOS，要求 POSIX shell、Node >=22、SFTP 与 TCP 转发；本机 Windows。远端 Windows shell 不冒充兼容。
+- 首版远端系统为 Linux/macOS，要求 POSIX shell、Node >=22.12.0、SFTP 与 TCP 转发；本机 Windows。远端 Windows shell 不冒充兼容。
 - 独立配置位于 DSH_HOME/plugins/deepseek-harness-ssh，不读写 ~/.ssh/config 或 VS Code 配置；私钥可引用已有文件，Agent 不转发。
 - 断线不回落到本地执行；保持远端数据，重连重新启动 Host。禁用/卸载释放监听器、SSH、隧道与受管 Host。
 - 未使用真实外部电脑的结果必须在验证文档中说明，区分真 SSH 本机夹具、真实 DSH 与无法覆盖的真实服务器差异。

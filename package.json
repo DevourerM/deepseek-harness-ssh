@@ -9,8 +9,8 @@
   "main": "lib/index.js",
   "icon": "assets/ssh.svg",
   "exports": {".": "./lib/index.js", "./client": "./lib/client.js", "./package.json": "./package.json", "./cordis.patch.yml": "./cordis.patch.yml"},
-  "files": ["lib", "assets", "cordis.patch.yml", "README.md", "LICENSE"],
-  "engines": {"node": ">=22"},
+  "files": ["lib", "assets", "docs", "cordis.patch.yml", "README.md", "LICENSE"],
+  "engines": {"node": ">=22.12.0"},
   "dsh": {
     "bundle": {"patch": "./cordis.patch.yml"},
     "client": {"platform": "web", "inject": ["@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-ui-workspace", "@deepseek-ai/dsh-client-ui-settings"]}

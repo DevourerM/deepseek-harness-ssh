@@ -5,12 +5,19 @@ import {join, relative, resolve, sep} from 'node:path';
 import {connect as tcpConnect} from 'node:net';
 
 // Real encrypted SSH/SFTP server on loopback. Virtual POSIX paths map to a temporary directory.
-export async function sshFixture(root, {onExec, password = 'test-password', hostKey} = {}) {
+export async function sshFixture(root, {onExec, password = 'test-password', hostKey, authorizedKey} = {}) {
   const key = hostKey || generateKeyPairSync('rsa', {modulusLength: 2048}).privateKey.export({format: 'pem', type: 'pkcs1'});
   const connections = new Set(), processes = new Set(), forwards = new Set(); let execCount = 0;
   const server = new ssh2.Server({hostKeys: [key]}, client => {
     connections.add(client); client.on('error', () => {}); client.once('close', () => connections.delete(client));
-    client.on('authentication', ctx => { if (ctx.method === 'password' && ctx.username === 'tester' && ctx.password === password) ctx.accept(); else ctx.reject(['password']); });
+    client.on('authentication', ctx => {
+      if (ctx.username === 'tester' && ctx.method === 'password' && ctx.password === password) return ctx.accept();
+      if (ctx.username === 'tester' && ctx.method === 'publickey' && authorizedKey && ctx.key.data.equals(authorizedKey)) {
+        const parsed = ssh2.utils.parseKey(ctx.key.data);
+        if (!ctx.signature || parsed.verify(ctx.blob, ctx.signature, ctx.hashAlgo) === true) return ctx.accept();
+      }
+      ctx.reject(['publickey', 'password']);
+    });
     client.on('ready', () => {
       client.on('session', accept => {
         const session = accept();

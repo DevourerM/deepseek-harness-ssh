@@ -4,6 +4,8 @@ import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:http';
+import {generateKeyPairSync} from 'node:crypto';
+import ssh2 from 'ssh2';
 import {ConfigStore} from '../src/host/config.js';
 import {SshConnector, browse, exec, forward, nodeCommand} from '../src/host/ssh.js';
 import {RemoteManager} from '../src/host/manager.js';
@@ -68,4 +70,38 @@ test('manager checks SSH + SFTP + runtime, and exposes background errors without
   const {jobId} = manager.job('check', {alias: 'loopback', secrets: {loopback: {password: 'do-not-print'}}});
   let job; do { await new Promise(r => setTimeout(r, 25)); job = manager.poll(jobId); } while (!job.done);
   assert.equal(job.error.code, 'SSH_CONNECT'); assert.ok(!JSON.stringify(job).includes('do-not-print'));
+});
+test('managed remote launch, canonical reuse, saved bookmarks and disconnect lifecycle', async t => {
+  const http = createServer((req, res) => res.end('managed remote Host'));
+  await new Promise(resolve => http.listen(0, '127.0.0.1', resolve)); t.after(() => http.close());
+  const f = await setup(t, {onExec: (_command, stream) => {
+    stream.write(`dsh web: http://127.0.0.1:${http.address().port}/?token=fixture-launch-token\n`);
+    stream.once('end', () => { stream.exit(0); stream.end(); });
+  }});
+  await f.trust(); const manager = new RemoteManager(f.store); t.after(() => manager.dispose());
+  const opened = await manager.open('loopback', '/project 空格', f.secrets);
+  assert.equal(opened.state, 'connected'); assert.equal(await (await fetch(opened.url)).text(), 'managed remote Host');
+  assert.equal((await manager.open('loopback', '/project 空格', f.secrets)).id, opened.id);
+  assert.equal((await f.store.bookmarks())[0].path, '/project 空格');
+  assert.ok(!JSON.stringify(manager.list()).includes('fixture-launch-token'));
+  assert.ok(!(await readConfig(f.store)).includes('test-password'));
+  manager.disconnect(opened.id); assert.equal(manager.get(opened.id).state, 'disconnected'); assert.equal(manager.get(opened.id).url, undefined);
+  await assert.rejects(fetch(opened.url));
+});
+async function readConfig(store) { return (await store.get()).text; }
+test('encrypted identity file authentication uses an ephemeral passphrase', async t => {
+  const key = generateKeyPairSync('rsa', {modulusLength: 2048}).privateKey.export({format: 'pem', type: 'pkcs1', cipher: 'aes-256-cbc', passphrase: 'ephemeral-key-passphrase'});
+  const authorizedKey = ssh2.utils.parseKey(key, 'ephemeral-key-passphrase').getPublicSSH();
+  const f = await setup(t, {authorizedKey}); await f.trust(); const path = join(f.root, 'identity with spaces'); await writeFile(path, key, {mode: 0o600});
+  const config = await f.store.get(); await f.store.save(config.text + `\n IdentityFile "${path}"`, config.revision);
+  await assert.rejects(f.connector.connect('loopback', {loopback: {passphrase: 'wrong'}}));
+  const c = await f.connector.connect('loopback', {loopback: {passphrase: 'ephemeral-key-passphrase'}});
+  assert.equal((await exec(c, 'fixture')).stdout, 'SSH_FIXTURE_OK'); c.close();
+  assert.ok(!(await readConfig(f.store)).includes('ephemeral-key-passphrase'));
+});
+test('failed remote startup cleans resources and redacts launch tokens from errors', async t => {
+  const f = await setup(t, {onExec: (_command, stream) => { stream.stderr.write('failed URL ?token=secret-value\n'); stream.exit(1); stream.end(); }});
+  await f.trust(); const manager = new RemoteManager(f.store); t.after(() => manager.dispose());
+  const error = await manager.open('loopback', '/project 空格', f.secrets).catch(e => e);
+  assert.equal(error.code, 'HOST_EXITED'); assert.ok(!error.message.includes('secret-value')); assert.equal(manager.list()[0].state, 'disconnected');
 });
