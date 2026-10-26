@@ -14,8 +14,9 @@ for (let offset = 0; offset + 512 <= tar.length;) {
   const name = header.subarray(0, 100).toString().replace(/\0.*$/s, ''), size = parseInt(header.subarray(124, 136).toString().replace(/\0.*$/s, '').trim(), 8) || 0;
   entries.set(name, tar.subarray(offset + 512, offset + 512 + size)); offset += 512 + Math.ceil(size / 512) * 512;
 }
-for (const name of ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js', 'lib/host/config.js', 'lib/host/ssh.js', 'lib/host/manager.js', 'lib/host/remote.js', 'assets/ssh.svg', 'README.md', 'LICENSE', 'node_modules/ssh2/lib/index.js', 'node_modules/asn1/package.json', 'node_modules/bcrypt-pbkdf/package.json', 'node_modules/tweetnacl/package.json', 'node_modules/safer-buffer/package.json']) assert.ok(entries.has('package/' + name), 'Missing package entry: ' + name);
-assert.ok(entries.has('package/lib/host/gateway.js'));
+for (const name of ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js', 'lib/host/config.js', 'lib/host/ssh.js', 'lib/host/jobs.js', 'lib/host/mounts.js', 'lib/host/filesystem.js', 'lib/host/processes.js', 'lib/host/file-worker.py', 'lib/host/process-worker.py', 'assets/ssh.svg', 'README.md', 'LICENSE', 'node_modules/ssh2/lib/index.js', 'node_modules/asn1/package.json', 'node_modules/bcrypt-pbkdf/package.json', 'node_modules/tweetnacl/package.json', 'node_modules/safer-buffer/package.json']) assert.ok(entries.has('package/' + name), 'Missing package entry: ' + name);
+assert.ok(!entries.has('package/lib/host/gateway.js'));
+assert.ok(!entries.has('package/lib/host/remote.js'));
 assert.equal(packed.bundled.length, 5, 'SSH protocol dependency tree must be bundled for software/offline installation');
 const manifest = JSON.parse(entries.get('package/package.json'));
 assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml'); assert.equal(manifest.exports['./client'], './lib/client.js');

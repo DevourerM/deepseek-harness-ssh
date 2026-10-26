@@ -22,7 +22,7 @@ try {
   await page.getByRole('textbox', {name: '包名或地址', exact: true}).fill(join(root, 'dist', packageName));
   await page.getByRole('button', {name: '安装', exact: true}).click();
   await page.getByText('deepseek-harness-ssh', {exact: true}).first().waitFor({timeout: 120000});
-  const enable = page.getByRole('button', {name: '立即启用', exact: true}); await enable.waitFor({timeout: 120000}); await enable.click(); await enable.waitFor({state: 'hidden'});
+  const enable = page.getByRole('button', {name: '立即启用', exact: true}); await enable.waitFor({timeout: 120000}); await enable.click(); await enable.waitFor({state: 'hidden', timeout: 120000});
   await page.screenshot({path: join(artifacts, 'software-install.png'), fullPage: true});
   await page.getByRole('button', {name: '账号菜单', exact: true}).click(); await page.getByText('设置', {exact: true}).click();
   await page.getByText('SSH 远程工作区', {exact: true}).first().click(); await page.locator('.ds-ssh-settings').waitFor();

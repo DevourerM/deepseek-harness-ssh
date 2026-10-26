@@ -1,91 +1,67 @@
-# DSH SSH 远程工作区
+# DSH SSH 远程文件夹
 
-DeepSeek Harness 的标准 SSH 插件。在新建工作区时选择本地或远程文件夹，通过 SSH 接管远端目录。提供独立连接配置、指纹确认、连接检查、SFTP 目录浏览、远端运行时安装、桌面内远程界面和连接管理。
+把远程文件夹加入**本地 DSH** 的工作区列表。本地模型和账号通过 SSH 直接读取、写入、编辑远程文件，在远程目录执行命令；聊天、模型设置与会话保存在本机。
 
-![本地与远程工作区选择](docs/images/workspace-choice.png)
+0.2.0 使用本地 Host 架构。远端只需要 **SSH、SFTP、POSIX 环境与 Python 3**，无需配置模型账号、安装 DSH、Node 或 npm。已实机验证 Windows 本机 + Rocky Linux 9 远端、DSH **0.2.1-rc.3**。其他宿主版本和 macOS 远端尚未实机验证。
 
-首版目标宿主 **DSH 0.2.1-rc.3**，本机 Windows，远端 **Linux / macOS + POSIX shell + Node.js ≥22.12.0 + npm**。远端需开放 SSH、启用 SFTP 与 TCP 转发；不需要向公网开放 DSH 端口。远端 Windows 暂不支持。测试覆盖与尚未验证的部分见 [验证记录](docs/VALIDATION.md)。
+## 安装与配置
 
-## 在软件中安装
-
-发行文件：`dist/deepseek-harness-ssh-0.1.1.tgz`。
-
-1. 打开 DSH **插件 → 添加插件**。
-2. 在“包名或地址”填写 `.tgz` 的本机绝对路径，例如：
+1. 打开 DSH **插件 → 添加插件**，在“包名或地址”填写安装包绝对路径：
 
    ```text
-   D:\code\dsh-plugin\deepseek-harness-ssh\dist\deepseek-harness-ssh-0.1.1.tgz
+   D:\code\dsh-plugin\deepseek-harness-ssh\dist\deepseek-harness-ssh-0.2.0.tgz
    ```
 
-3. 安装并点击 **立即启用**；如宿主提示重启，按提示操作。
+2. 安装并选择 **立即启用**，按宿主提示重启。
+3. 打开 **设置 → SSH 远程工作区**，保存独立配置并点击 **检查连接**：
 
-包内含构建产物和纯 JavaScript SSH 依赖，安装不要求编译原生模块。开发源码使用 `npm ci --ignore-scripts --omit=optional`，再 `npm run pack:plugin` 生成安装包。当前尚未发布 GitHub Release 或 npm；不要只输入裸包名。
+   ```sshconfig
+   Host my-server
+     HostName 192.168.1.20
+     User developer
+     Port 22
+     IdentityFile ~/.ssh/id_ed25519
 
-## 配置远程电脑
+   Host bastion
+     HostName gateway.example.com
+     User developer
+     IdentityAgent default
 
-打开侧栏底部 **更多 → 设置 → SSH 远程工作区**，编辑并保存：
+   Host private-server
+     HostName 10.0.0.20
+     User developer
+     ProxyJump bastion
 
-```sshconfig
-Host my-server
-  HostName 192.168.1.20
-  User developer
-  Port 22
-  IdentityFile ~/.ssh/id_ed25519
-  # NodePath /usr/local/bin/node
+   Host *
+     ConnectTimeout 15
+     ServerAliveInterval 15
+   ```
 
-Host bastion
-  HostName gateway.example.com
-  User developer
-  IdentityAgent default
+首次连接需要核对 SHA256 主机指纹。缺少登录密码或加密私钥口令时会弹出输入框，提交后继续原操作；错误密码可以重输。密码只用于当前连接，不写入配置或浏览器持久存储。断线后自动尝试密钥认证，必要时在本地窗口重新提示密码；也可以取消连接。跳板机使用独立凭据。支持单个密码提示的 keyboard-interactive；多轮验证码/MFA 尚不支持。
 
-Host private-server
-  HostName 10.0.0.20
-  User developer
-  ProxyJump bastion
-  IdentityFile "C:\My Keys\id_ed25519"
+配置位于 `%USERPROFILE%\.dsh\plugins\deepseek-harness-ssh\config`，或 `$DSH_HOME/plugins/deepseek-harness-ssh/config`。配置与主机指纹库独立于 VS Code 和 OpenSSH 配置。可以引用已有私钥；不会转发 SSH Agent。支持上述指令、`IdentityAgent none`、引号、注释、`Key=Value` 与 `Host *` 默认值。出于兼容性仍接受旧的 `NodePath` 字段，当前版本不使用它。拒绝 Include、ProxyCommand 和任意本地命令。
 
-Host *
-  ConnectTimeout 15
-  ServerAliveInterval 15
-```
+## 使用远程文件夹
 
-- 配置独立保存在 `$DSH_HOME/plugins/deepseek-harness-ssh/config`；默认 Windows 为 `%USERPROFILE%\.dsh\plugins\deepseek-harness-ssh\config`。不会读写 VS Code 配置或 `~/.ssh/config`。
-- 仅支持上例指令及 `IdentityAgent none`。首个匹配值优先；支持 `Host *` 默认值、多个确切别名、注释、引号及 `Key=Value`。不支持通配 Host、Include、ProxyCommand 或任意本地命令。
-- `IdentityFile` 指向本机私钥，可引用既有 SSH 密钥。配置私钥时默认不尝试 Agent；否则默认使用本机 SSH Agent。Windows 支持 OpenSSH Agent 管道。Agent 不转发给远端。
-- 使用密码或加密私钥时，展开“临时认证”，输入密码或口令；跳板机有独立输入框。内容只存在界面与操作内存中，不写入配置，不使用浏览器持久存储。关闭窗口后需重新输入。
-- 也可直接点击检查连接、浏览或连接：缺少密码/私钥口令时会出现认证表单，提交后继续刚才的操作；密码错误可手动重输，不会自动反复尝试。支持单个密码提示的 keyboard-interactive 服务器，验证码提示不会接收登录密码。断线重连也可在原位输入密码。
-- 首次连接会显示 SHA256 指纹。请向管理员核对后点击“指纹一致，信任并继续”；已信任指纹变化时阻止连接。指纹库为插件独立的 `known-hosts.json`。
-- 设置 `NodePath` 为远端 Node 可执行文件的绝对路径，可解决非交互 SSH 环境未加载 nvm 等 PATH 的问题；运行时安装仍需要 PATH 中有 npm。
+1. 点击 **添加工作区**，选择 **远程文件夹 · SSH**。
+2. 选择主机，浏览或输入远程目录，例如 `~/project`。
+3. 点击 **连接并创建远程工作区**，本地工作区列表出现 `SSH · 主机 · 目录`。
+4. 继续使用本地现有模型聊天。原生 `read`、`write`、`edit` 直接操作远程文件，`glob`、`grep` 使用远程 Python 搜索，命令使用 `ssh_exec`。
+5. 右侧栏选择 **工作区文件** 可使用原生预览；安装了接管文件页的第三方侧栏时，选择 **SSH 文件** 浏览和预览远程目录。
 
-## 检查连接与准备远端
+文件更改直接发生在服务器，支持中文、空格、版本冲突保护和原子替换。原生文件观察使用定时检查，SSH 文件页提供刷新按钮。搜索跳过隐藏目录、`node_modules`、`__pycache__`，最多扫描 10000 个文件、返回 1000 条结果；内容搜索使用 Python 正则，跳过超过 2 MiB 的文件，不解析 `.gitignore`。
 
-选择主机，点击 **检查连接**，依次检查 SSH 认证、SFTP 主目录、远端 Node 与插件管理的 DSH 版本。SSH 成功但运行时缺失时，会分别说明。
+默认权限由本地 DSH 管理：只读模式拒绝直接写入，工作区写入模式检查远端规范路径及软链接边界。`ssh_exec` 的远程 Shell 不受本机操作系统沙箱约束，因此非完全访问模式下每次命令走 DSH 原生审批；完全访问模式按用户所选权限执行。远端命令不会退回本地 PowerShell。
 
-远端已有 Node ≥22.12.0 与 npm 后，点击 **安装远端 DSH 运行时… → 开始远端安装**。插件通过 SSH 在远端 `~/.dsh-ssh/runtime/0.2.1-rc.3` 安装固定版本 `@deepseek-ai/dsh@0.2.1-rc.3`，不改远端全局 npm 安装。首次需要远端能访问 npm，安装可能需要数分钟；界面可取消。
+## 兼容边界
 
-## 创建与使用工作区
+DSH 的工作区注册硬编码本机路径，因此本机保留一个空的身份目录和持久映射，接入原生工作区列表；项目文件不会复制或同步到该目录。插件只对已登记的 SSH 工作区路由文件系统与进程操作，普通本地工作区继续使用原实现。卸载插件不会删除服务器文件。
 
-1. 点击工作区区域的新增文件夹按钮，或按 DSH 的新增工作区快捷键。
-2. 先选择 **本地文件夹** 或 **远程文件夹 · SSH**。本地可浏览或填写绝对路径。
-3. 远程选择已保存主机，填写临时认证（如需），点击 **浏览目录**，逐层进入项目，或直接输入 `/home/user/project`、`~/project`。
-4. 点击 **连接并创建远程工作区**。桌面内显示远程 DSH，顶部标明主机和路径。
-5. 在远端界面配置模型账号或 API Key，再正常聊天、浏览文件、预览文件、使用终端与权限审批。
-
-原生文件侧栏、终端和模型工具均连接远端 Host，因此读写与执行属于同一台电脑。聊天、项目目录、Git 和远端权限由远端 DSH 管理。首次账号配置需在远端完成，不会自动复制本机模型密钥、插件或会话。
-
-**返回本地** 保持远程连接；可在 SSH 设置的连接列表重新打开或断开。最近成功打开的远程目录会持久保存，下次新建可直接选择。SSH 断线后显示重连界面；临时认证不会自动记住，必要时返回本地重新输入。不会因断线改到本地执行远程任务。
-
-## 架构、数据和限制
-
-当前宿主工作区的身份校验使用本机 `fs.realpath/stat`，没有可注册的 SSH 工作区 provider。因此插件使用官方 SSH 使用方式：远端完整 DSH Web Host，通过加密 SSH 隧道在本地回环随机端口提供给桌面内 iframe。它不是将远程目录伪装成本地目录。原生左栏显示的是远端 Host 自己的工作区；本地和远程 Host 的会话列表互相独立。
-
-- 远端工作区数据位于 `~/.dsh-ssh/workspaces/<目录 SHA256 前24位>/`，同一目录重连使用同一数据目录。远端运行时、工作区数据不会因本机卸载而删除。
-- 本机配置、指纹、最近目录位于插件数据目录；账号密码和带 token 的启动 URL 不写入这些文件。启动 token 仅在当前界面和进程内存中使用。
-- SSH 与远端 DSH 都只监听回环地址。远端 Host 增加指定本地隧道端口的 Host 信任，仍使用 DSH 原生启动 token、Cookie、Origin 校验和审批机制。
-- 本地 HTTP 网关通过 SSH 转发请求；为兼容桌面 `dsh-app://` 的跨站嵌入，仅将原生登录 Cookie 转为 `HttpOnly; SameSite=None; Secure; Partitioned`，由浏览器按顶层站点隔离。网关不保存/伪造登录 Cookie，不注入认证，其他站点和未登录请求仍需远端原生认证。要求支持分区 Cookie 的现代 Chromium（DSH 0.2.1-rc.3 的桌面浏览器）。
-- 同时最多连接 4 个远程工作区；断开会停止本插件启动的远端 Host，远端磁盘数据保留。网络中断后的进程回收依赖远端 SSH 会话 EOF / 信号传播；插件不能对远端突然断电提供进程回收保证。
-- 当前不支持远端 Windows、多轮 MFA / 验证码、任意 OpenSSH 指令、端口转发规则编辑、X11、Agent 转发、会话在本地与远端之间迁移。
-- 远端原生插件需另行安装。涉及浏览器弹窗、原生桌面专属能力、Office 转换等依赖功能，以远端 DSH 与浏览器环境支持情况为准。
+- 已验证原生模型工具、工作区创建、会话、文件树/预览、本地模型设置和原生命令审批。
+- `dsh-better-sidebar` 的文件和 Git 功能直接访问 Node 本机文件系统，无法通过 DSH 文件接口自动接管。插件提供独立的 **SSH 文件** 页兼容浏览/预览；该第三方插件的远程编辑、上传、Git 等能力暂未接入。
+- 原生交互终端及依赖本机暂存目录的 Git 快照暂不支持 SSH 工作区；终端请求会明确失败。可让模型使用 `ssh_exec` 执行远程 Git、构建和其他命令。
+- 目前不支持远端 Windows、会话在本地/远程之间迁移、远程端口转发 UI，以及任意依赖本地磁盘路径的第三方插件。
+- 0.1.x 的远程 Host 会话不会自动迁入本机会话。0.2.0 不再启动远端 DSH，旧版本遗留的远端运行时文件保留，当前功能不依赖它们。
 
 ## 开发与验证
 
@@ -95,14 +71,10 @@ npm run build
 npm test
 npm run test:host
 npm run test:ui
-npm run test:install
 npm run pack:plugin
+npm run test:install
 ```
 
-核心测试建立本地真实加密 SSH/SFTP 服务，无需外部电脑。宿主与 UI 测试需要合法的 DSH 0.2.1-rc.3 运行时，设置 `DSH_DEV_RUNTIME` 为 `node_modules` 路径；UI 测试另需 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。测试数据、临时 Host、SSH 服务和截图全部在 `artifacts/`，不会操作用户正在使用的 DSH 配置。
+宿主测试需要 DSH 0.2.1-rc.3 运行时，通过 `DSH_DEV_RUNTIME` 指定其 `node_modules`。UI 测试需要 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。`npm run test:remote` 读取本机忽略的 `artifacts/real-server/config` 与独立主机指纹，在服务器专用验证目录运行本地模拟模型及真实 SSH 文件测试，不请求外部模型。
 
-本项目使用独立 Git 仓库，设计与阶段见 [实现计划](docs/PLAN.md)。MIT License；与 DeepSeek 官方无隶属关系。
-
-开发者可用 `node scripts/install-desktop.mjs` 安装到本机 Desktop profile，安装器保留其他插件与现有模型配置，并备份被更新的清单。普通用户仍使用软件的 `.tgz` 安装界面。
-
-远端已有 VS Code Server、但系统 PATH 没有 Node/npm 时，可使用 `node scripts/deploy-server.mjs <已信任的 SSH 别名>`：复制符合版本要求的 Node 到用户独立工具目录、校验并安装 npm，再安装固定版本 DSH；设置中的 `NodePath` 指向该独立 Node。这个开发部署工具只读 OpenSSH 连接资料，不共用或改写其配置。不要把个人连接配置、主机地址或验证产物提交到 Git。
+安装包包含构建产物与纯 JavaScript SSH 依赖。`node scripts/install-desktop.mjs` 可更新本机 Desktop profile，保留模型设置和其他插件，并备份清单与旧插件。详见 [实现计划](docs/PLAN.md) 和 [验证记录](docs/VALIDATION.md)。本项目使用独立 Git 仓库，MIT License。

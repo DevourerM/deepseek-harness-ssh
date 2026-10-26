@@ -1,7 +1,7 @@
 {
   "name": "deepseek-harness-ssh",
-  "version": "0.1.1",
-  "description": "SSH remote workspaces for DeepSeek Harness",
+  "version": "0.2.0",
+  "description": "Local DeepSeek Harness models with SSH remote folders and file tools",
   "type": "module",
   "license": "MIT",
   "author": "Snoyi Selew",
@@ -53,6 +53,19 @@
     "test:host": "node scripts/host-smoke.mjs",
     "test:ui": "node scripts/ui-smoke.mjs",
     "test:install": "node scripts/ui-install.mjs",
-    "pack:plugin": "node scripts/build.mjs && node scripts/pack.mjs"
+    "pack:plugin": "node scripts/build.mjs && node scripts/pack.mjs",
+    "test:remote": "node scripts/local-workspace-smoke.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-fs": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.3"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-fs": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
   }
 }
