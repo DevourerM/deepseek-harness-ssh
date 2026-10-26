@@ -41,13 +41,17 @@ function useOperation() {
     trust: () => { const fn = retry.current; return run(async (signal, extra) => { await api({action: 'trust', challengeId: error.details.challengeId}, signal); return fn(signal, extra); }, false); }};
 }
 function mergeSecrets(base = {}, extra = {}) { const result = {...base}; for (const [alias, value] of Object.entries(extra)) result[alias] = {...result[alias], ...value}; return result; }
+function Icon({kind, size = 22}) {
+  const paths = {folder: ['M3 7h6l2-3h10v16H3z'], server: ['M4 3h16v7H4z','M4 14h16v7H4z','M7 6.5h.01','M7 17.5h.01','M11 6.5h6','M11 17.5h6'], arrow: ['m9 5 7 7-7 7'], check: ['m5 12 4 4L19 6']};
+  return h('svg', {width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.6,strokeLinecap:'round',strokeLinejoin:'round','aria-hidden':true}, (paths[kind] || paths.folder).map((d,i)=>h('path',{d,key:i})));
+}
 function Button({children, onClick, disabled, primary, ...rest}) { return h('button', {type: 'button', className: `ds-ssh-button${primary ? ' ds-ssh-primary' : ''}`, disabled, onClick, ...rest}, children); }
 function AuthenticationPrompt({error, busy, submit}) {
-  const [value, setValue] = useState(''); const details = error.details, passphrase = details.kind === 'passphrase';
+  const [value, setValue] = useState(''), [show, setShow] = useState(false); const details = error.details, passphrase = details.kind === 'passphrase';
   return h('form', {className: 'ds-ssh-trust', 'aria-label': 'SSH 认证', onSubmit: e => { e.preventDefault(); if (value) { submit({[details.alias]: {[passphrase ? 'passphrase' : 'password']: value}}); setValue(''); } }},
     h('strong', null, error.code === 'SSH_AUTH_FAILED' ? '认证未通过，请重新输入' : '请输入 SSH 认证信息'),
     h('p', null, `${details.alias} · ${details.username}@${details.hostname}`),
-    h(Field, {label: passphrase ? '私钥口令' : 'SSH 登录密码', type: 'password', autoComplete: 'off', autoFocus: true, value, disabled: busy, onChange: e => setValue(e.target.value)}),
+    h('div', {className:'ds-ssh-password'}, h(Field, {label: passphrase ? '私钥口令' : 'SSH 登录密码', type: show ? 'text' : 'password', autoComplete: 'off', autoFocus: true, value, disabled: busy, onChange: e => setValue(e.target.value)}), h(Button, {onClick:()=>setShow(!show),'aria-pressed':show,disabled:busy}, show?'隐藏密码':'显示密码')),
     h('p', {className: 'ds-ssh-muted'}, '仅在当前窗口中临时使用，不保存到配置文件。输入后会继续刚才的操作。'),
     h('button', {className: 'ds-ssh-button ds-ssh-primary', type: 'submit', disabled: busy || !value}, '验证并继续'));
 }
@@ -77,20 +81,21 @@ function Credentials({hosts, alias, secrets, setSecrets, disabled}) {
 function ConnectionResult({value}) {
   if (!value?.ssh) return null;
   return h('div', {className: 'ds-ssh-notice', role: 'status'},
-    h('strong', null, value.ready ? '连接检查通过，可创建远程工作区' : 'SSH 连接尚未就绪'),
+    h('div', {className:'ds-ssh-result-title'}, h(Icon,{kind:'check',size:18}), h('strong', null, value.ready ? '连接检查通过，可创建远程工作区' : 'SSH 连接尚未就绪')),
     h('p', null, `主目录 ${value.home} · 检查耗时 ${value.latencyMs} ms`),
     h('p', null, '由本地 DSH 直接读写远程目录，继续使用本地账号、模型和聊天。'));
 }
 function Settings({ctx}) {
   const [config, setConfig] = useState(null), [text, setText] = useState(''), [alias, setAlias] = useState('');
   const [secrets, setSecrets] = useState({}), [known, setKnown] = useState({}), [sessions, setSessions] = useState([]);
+  const [configOpen, setConfigOpen] = useState(true);
   const op = useOperation();
   const accept = data => { setConfig(data); setText(data.text); setAlias(old => data.hosts.some(x => x.alias === old) ? old : data.hosts[0]?.alias || ''); };
   const load = async signal => { const data = await api({action: 'config'}, signal); accept(data); setKnown(await api({action: 'known'}, signal)); setSessions(await api({action: 'sessions'}, signal)); };
   useEffect(() => { op.run(load); }, []);
   return h('section', {className: 'ds-ssh-settings'},
-    h('h2', null, 'SSH 远程工作区'), h('p', {className: 'ds-ssh-muted'}, '把远程文件夹加入本地工作区列表。本地 DSH 使用现有模型和账号，通过 SSH 读取、写入和执行命令。'),
-    h('div', {className: 'ds-ssh-card'}, h('h3', null, '连接配置'),
+    h('div', {className:'ds-ssh-heading'}, h('span',{className:'ds-ssh-icon-tile'},h(Icon,{kind:'server'})),h('div',null,h('h2', null, 'SSH 远程工作区'),h('span',{className:'ds-ssh-muted'},'本地模型 · 远程文件'))), h('p', {className: 'ds-ssh-muted'}, '把远程文件夹加入本地工作区列表。本地 DSH 使用现有模型和账号，通过 SSH 读取、写入和执行命令。'),
+    h('details', {className: 'ds-ssh-card ds-ssh-config-card',open:configOpen,onToggle:e=>setConfigOpen(e.currentTarget.open)}, h('summary',null,h('strong',null,'连接配置'),h('span',{className:'ds-ssh-muted'},config?.hosts.length?`${config.hosts.length} 台远程电脑 · 编辑配置`:'添加你的第一台远程电脑')),
       h('p', {className: 'ds-ssh-muted'}, '使用独立的 OpenSSH 风格配置，Host 为别名。支持 HostName、User、Port、IdentityFile、IdentityAgent、ProxyJump、ConnectTimeout、ServerAliveInterval。'),
       config && h('code', {className: 'ds-ssh-config-path'}, config.path),
       h('textarea', {'aria-label': 'SSH 连接配置', spellCheck: false, className: 'ds-ssh-config', value: text, disabled: !config || op.busy, onChange: e => setText(e.target.value)}),
@@ -128,10 +133,11 @@ function WorkspaceFlow(props) {
   const close = () => { op.cancel(); onCancel(); };
   return h('div', {className: 'ds-ssh-backdrop', onKeyDown: e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } }},
     h('div', {className: 'ds-ssh-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': '新建工作区', tabIndex: -1, ref: node => { if (node && !node.contains(document.activeElement)) node.focus(); }},
-      h('div', {className: 'ds-ssh-row'}, h('h2', null, '新建工作区'), h(Button, {'aria-label': '关闭新建工作区', onClick: close}, '×')),
+      h('div', {className: 'ds-ssh-row ds-ssh-dialog-header'}, h('div', null,h('span',{className:'ds-ssh-kicker'},'工作区'), h('h2', null, mode === 'choose'?'你想在哪里工作？':mode === 'remote'?'选择远程文件夹':'选择本地文件夹')), h(Button, {'aria-label': '关闭新建工作区', onClick: close}, '×')),
+      mode === 'choose' && h('p',{className:'ds-ssh-muted'},'选择项目所在的位置，继续使用这台电脑上的模型和聊天。'),
       mode === 'choose' && h('div', {className: 'ds-ssh-choices'},
-        h(Button, {disabled: op.busy, onClick: () => setMode('local')}, h('strong', null, '本地文件夹'), h('span', null, '在这台电脑上工作')),
-        h(Button, {disabled: op.busy, onClick: () => setMode('remote')}, h('strong', null, '远程文件夹 · SSH'), h('span', null, '连接远程电脑并接管目录'))),
+        h(Button, {disabled: op.busy, onClick: () => setMode('local')}, h('i',{className:'ds-ssh-choice-icon'},h(Icon,{kind:'folder',size:27})),h('strong', null, '本地文件夹'), h('span', null, '在这台电脑上工作'),h('i',{className:'ds-ssh-choice-arrow'},h(Icon,{kind:'arrow',size:18}))),
+        h(Button, {disabled: op.busy, onClick: () => setMode('remote')}, h('i',{className:'ds-ssh-choice-icon'},h(Icon,{kind:'server',size:27})),h('strong', null, '远程文件夹 · SSH'), h('span', null, '连接远程电脑并接管目录'),h('i',{className:'ds-ssh-choice-arrow'},h(Icon,{kind:'arrow',size:18})))),
       mode === 'local' && h('div', {className: 'ds-ssh-stack'},
         h('p', null, '选择本机已有文件夹作为工作区。'), h(Field, {label: '本地文件夹绝对路径', value: local, disabled: op.busy, onChange: e => setLocal(e.target.value), placeholder: 'D:\\projects\\my-project'}),
         h('div', {className: 'ds-ssh-row'},
@@ -145,10 +151,10 @@ function WorkspaceFlow(props) {
         h(Credentials, {hosts: config?.hosts || [], alias, secrets, setSecrets, disabled: op.busy}),
         h('div', {className: 'ds-ssh-row'}, h(Field, {label: '远程目录', value: path, disabled: op.busy, placeholder: '~/projects', onChange: e => setPath(e.target.value)}),
           h(Button, {disabled: !alias || op.busy, onClick: () => browsePath(path)}, '浏览目录')),
-        listing && h('div', {className: 'ds-ssh-files', 'aria-label': '远程目录列表'},
+        listing && h('div', {className: 'ds-ssh-directory'},h('div',{className:'ds-ssh-breadcrumb'},h(Icon,{kind:'folder',size:16}),h('code',null,listing.path),h(Button,{disabled:op.busy,onClick:()=>browsePath('~')},'主目录')),h('div', {className: 'ds-ssh-files', 'aria-label': '远程目录列表'},
           h(Button, {disabled: op.busy, onClick: () => browsePath(listing.path === '/' ? '/' : listing.path.slice(0, listing.path.lastIndexOf('/')) || '/')}, '↑ 上级目录'),
           listing.directories.map(entry => h(Button, {key: entry.name, disabled: op.busy, onClick: () => browsePath((listing.path === '/' ? '' : listing.path) + '/' + entry.name)}, '▸ ' + entry.name + (entry.symlink ? ' ↗' : ''))),
-          !listing.directories.length && h('p', {className: 'ds-ssh-muted'}, '此目录中没有子目录'), listing.truncated && h('p', null, '只显示前 2000 个目录，可输入完整路径继续。')),
+          !listing.directories.length && h('p', {className: 'ds-ssh-empty'}, '此目录中没有子目录，可以直接选择当前目录。'), listing.truncated && h('p', null, '只显示前 2000 个目录，可输入完整路径继续。'))),
         h('p', {className: 'ds-ssh-muted'}, '使用本地模型和聊天，文件直接读写到远程电脑。'),
         h(Button, {primary: true, disabled: !alias || !path.trim() || op.busy, onClick: () => op.run(async (signal, extra) => { const workspace = await action({action: 'open', alias, path, secrets: mergeSecrets(secrets, extra)}, signal); onPicked(workspace.localRoot); })}, '连接并创建远程工作区')),
       h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value))}),
@@ -173,28 +179,15 @@ function ConnectionAuthentication() {
   }, []);
   return pending ? h(AuthenticationRequest, {key: pending.id, pending}) : null;
 }
-function SshFiles({ctx, sessionId}) {
-  const [listing, setListing] = useState(null), [file, setFile] = useState(null), [local, setLocal] = useState(false);
-  const op = useOperation();
-  const load = path => op.run(async signal => { const value = await api({action: 'file-list', sessionId, path}, signal); setListing(value); setLocal(!value); setFile(null); });
-  useEffect(() => { load(); }, [sessionId]);
-  return h('section', {className: 'ds-ssh-explorer', 'aria-label': 'SSH 文件'},
-    h('div', {className: 'ds-ssh-row'}, h('strong', null, 'SSH 文件'), h(Button, {disabled: op.busy, onClick: () => load(listing?.path)}, '刷新')),
-    local && h('p', null, '当前会话使用本地文件夹。选择 SSH 工作区后可在这里浏览远程文件。'),
-    listing && h('div', null, h('p', {className: 'ds-ssh-muted'}, listing.alias), h('code', null, listing.path),
-      listing.path !== listing.root && h(Button, {disabled: op.busy, onClick: () => load(listing.path.slice(0, listing.path.lastIndexOf('/')) || '/')}, '↑ 上级目录'),
-      h('div', {className: 'ds-ssh-files'}, [...listing.entries].sort((a,b) => Number(b.type === 'directory') - Number(a.type === 'directory') || a.name.localeCompare(b.name)).map(entry =>
-        h(Button, {key: entry.name, disabled: op.busy, onClick: () => entry.type === 'directory' ? load(entry.path) : op.run(async signal => { const value = await api({action: 'file-read', sessionId, path: entry.path}, signal); setFile(value); })}, (entry.type === 'directory' ? '▸ ' : '') + entry.name)))),
-    h(Notice, {op}), file && h('div', {className: 'ds-ssh-preview'}, h('strong', null, file.path.split('/').at(-1)), h('pre', null, file.text)));
-}
 function apply(ctx) {
   ctx.effect(() => { const style = document.createElement('style'); style.dataset.plugin = ID; style.textContent = CSS; document.head.appendChild(style); return () => { style.remove(); }; });
   ctx.slots.inject('settings.section', () => ctx.slots.register({name: 'settings.section', id: ID, order: 35, label: () => 'SSH 远程工作区', inject: () => ({ctx})}, Settings));
   for (const name of ['sidebar.workspaces.directoryFlow', 'conversation.hero.workspace.directoryFlow']) ctx.slots.inject(name, () => ctx.slots.register({name, priority: -100, inject: () => ({ctx})}, WorkspaceFlow));
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({name: 'shell.overlay', id: ID, order: 90}, ConnectionAuthentication));
-  ctx.inject(['sidebarRightTabs'], scoped => {
-    scoped.effect(() => scoped.sidebarRightTabs.register({id: ID + ':files', kind: 'ssh-files', priority: 'extension', title: () => 'SSH 文件', guide: [{id: ID + ':files', order: 11, title: () => 'SSH 文件', description: () => '浏览和预览远程工作区文件'}]}));
-    scoped.slots.inject('sidebar.right.pane.tab', () => scoped.slots.register({name: 'sidebar.right.pane.tab', key: ID + ':files', inject: sessionId => ({ctx: scoped, sessionId})}, SshFiles));
-    scoped.slots.inject('sidebar.right.pane.tab.title', () => scoped.slots.register({name: 'sidebar.right.pane.tab.title', key: ID + ':files'}, () => h('span', null, 'SSH 文件')));
-  });
+  ctx.inject(['sidebarRight'], scope => scope.effect(() => {
+    // Close only this plugin's obsolete 0.2.0 tabs as their sessions are adopted.
+    const migrate = () => {for (const tab of scope.sidebarRight.openTabs.getSnapshot()) if (tab.kind === 'ssh-files') scope.sidebarRight.closeIn(tab.sessionId, tab.tabId);};
+    const timer = setInterval(migrate, 1000); migrate();
+    return () => clearInterval(timer);
+  }));
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, readFile} from 'node:fs/promises';
+import {mkdtemp, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {Mounts} from '../src/host/mounts.js';
@@ -22,6 +22,14 @@ test('SSH routing isolates local paths, concurrent sessions, and changed POSIX d
   })));
   assert.equal(mounts.route('x'), null);
   assert.throws(()=>mounts.scope.run(a,()=>mounts.route('C:\\outside\\file.txt')),{code:'FS_SANDBOX_DENIED'});
+});
+test('restored SSH workspaces repair generated identity titles and preserve custom names',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'ssh-title-')), record={id:'0123456789abcdef01234567',alias:'server',remoteRoot:'/srv/project',localRoot:join(root,'identity'),workspaceId:'workspace'};
+  await writeFile(join(root,'mounts.json'),JSON.stringify([record]));
+  const workspace={title:record.id,async setTitle(value){this.title=value;}};
+  const mounts=new Mounts({root},{workspaceRegistry:{get:()=>workspace}});
+  await mounts.init();assert.equal(workspace.title,'SSH · server · project');
+  workspace.title='My project';await mounts.init();assert.equal(workspace.title,'My project');mounts.dispose();
 });
 test('filesystem adapter leaves local calls alone and restores services on unload', async () => {
   const mounts = new Mounts({}); const record = {id:'one',localRoot:join(tmpdir(),'ssh-adapter'),remoteRoot:'/srv/one'}; mounts.records=[record];

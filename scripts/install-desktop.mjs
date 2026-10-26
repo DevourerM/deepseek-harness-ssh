@@ -18,7 +18,7 @@ await mkdir(stage, {recursive: true});
 for (const name of pkg.files) await cp(join(root, name), join(stage, name), {recursive: true});
 await writeFile(join(stage, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
 await mkdir(join(stage, 'node_modules'), {recursive: true});
-for (const name of ['ssh2', 'asn1', 'bcrypt-pbkdf', 'tweetnacl', 'safer-buffer']) await cp(join(root, 'node_modules', name), join(stage, 'node_modules', name), {recursive: true});
+for (const name of ['ssh2', 'asn1', 'bcrypt-pbkdf', 'tweetnacl', 'safer-buffer', 'ws']) await cp(join(root, 'node_modules', name), join(stage, 'node_modules', name), {recursive: true});
 const backup = join(profile, '.dsh-ssh-install/backups', String(Date.now())); await mkdir(backup, {recursive: true});
 await writeFile(join(backup, 'package.json'), original);
 manifest.dependencies ??= {}; manifest.dependencies[pkg.name] = 'file:' + root.replaceAll('\\', '/');

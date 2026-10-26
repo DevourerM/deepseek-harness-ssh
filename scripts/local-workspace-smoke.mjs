@@ -75,11 +75,7 @@ try {
   await page.getByRole('button', {name: /^工作区文件/}).click();
   await page.locator('[data-files-state="tree"]').getByText('local-model-proof.txt', {exact: true}).click();
   await page.getByText('LOCAL_DSH_REMOTE_FILE_V2', {exact: true}).filter({visible: true}).first().waitFor();
-  await page.getByRole('button', {name: '新标签页', exact: true}).click();
-  await page.getByRole('button', {name: /^SSH 文件/}).click();
-  const explorer = page.getByRole('region', {name: 'SSH 文件', exact: true});
-  await explorer.getByRole('button', {name: 'local-model-proof.txt', exact: true}).click();
-  await explorer.getByText('LOCAL_DSH_REMOTE_FILE_V2', {exact: true}).waitFor();
+  assert.equal(await page.getByText('SSH 文件', {exact: true}).count(), 0);
   const sessions = (await auth.api({action: 'sessions'})).data; assert.equal(sessions.length, 1); assert.deepEqual(await readdir(sessions[0].localRoot), []);
   assert.deepEqual(errors, []);
   await page.screenshot({path: join(artifacts, 'local-ssh-workspace.png'), fullPage: true});
