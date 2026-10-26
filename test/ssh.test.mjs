@@ -24,7 +24,7 @@ async function setup(t, options) {
 test('real SSH handshake requires explicit trust, pins host key, rejects bad authentication', async t => {
   const f = await setup(t); const unknown = await f.trust(); assert.match(unknown.details.fingerprint, /^SHA256:/);
   assert.throws(() => f.connector.trust(unknown.details.challengeId), {code: 'TRUST_EXPIRED'});
-  await assert.rejects(f.connector.connect('loopback', {loopback: {password: 'wrong'}}), {code: 'SSH_CONNECT'});
+  await assert.rejects(f.connector.connect('loopback', {loopback: {password: 'wrong'}}), {code: 'SSH_AUTH_FAILED'});
   const c = await f.connector.connect('loopback', f.secrets); assert.equal((await exec(c, 'fixture')).stdout, 'SSH_FIXTURE_OK'); c.close();
   await f.store.forget(unknown.details.endpoint); await f.store.pin(unknown.details.endpoint, 'SHA256:wrong');
   await assert.rejects(f.connector.connect('loopback', f.secrets), {code: 'HOST_KEY_CHANGED'});
@@ -69,7 +69,7 @@ test('manager checks SSH + SFTP + runtime, and exposes background errors without
   const result = await manager.check('loopback', f.secrets); assert.equal(result.ready, true); assert.equal(result.sftp, true);
   const {jobId} = manager.job('check', {alias: 'loopback', secrets: {loopback: {password: 'do-not-print'}}});
   let job; do { await new Promise(r => setTimeout(r, 25)); job = manager.poll(jobId); } while (!job.done);
-  assert.equal(job.error.code, 'SSH_CONNECT'); assert.ok(!JSON.stringify(job).includes('do-not-print'));
+  assert.equal(job.error.code, 'SSH_AUTH_FAILED'); assert.ok(!JSON.stringify(job).includes('do-not-print'));
 });
 test('managed remote launch, canonical reuse, saved bookmarks and disconnect lifecycle', async t => {
   const http = createServer((req, res) => res.end('managed remote Host'));
@@ -104,4 +104,25 @@ test('failed remote startup cleans resources and redacts launch tokens from erro
   await f.trust(); const manager = new RemoteManager(f.store); t.after(() => manager.dispose());
   const error = await manager.open('loopback', '/project 空格', f.secrets).catch(e => e);
   assert.equal(error.code, 'HOST_EXITED'); assert.ok(!error.message.includes('secret-value')); assert.equal(manager.list()[0].state, 'disconnected');
+});
+test('missing password produces an actionable prompt, failed passwords never appear in errors', async t => {
+  const f = await setup(t); await f.trust();
+  const error = await f.connector.connect('loopback').catch(e => e);
+  assert.equal(error.code, 'SSH_AUTH_REQUIRED'); assert.equal(error.details.alias, 'loopback'); assert.equal(error.details.kind, 'password');
+  const failed = await f.connector.connect('loopback', {loopback: {password: 'a-secret-wrong-password'}}).catch(e => e);
+  assert.equal(failed.code, 'SSH_AUTH_FAILED'); assert.ok(!JSON.stringify(failed).includes('a-secret-wrong-password'));
+});
+test('keyboard-interactive password servers accept a supplied password and reject missing input', async t => {
+  const f = await setup(t, {keyboardOnly: true}); await f.trust();
+  await assert.rejects(f.connector.connect('loopback'), {code: 'SSH_AUTH_REQUIRED'});
+  await assert.rejects(f.connector.connect('loopback', {loopback: {password: 'wrong'}}), {code: 'SSH_AUTH_FAILED'});
+  const c = await f.connector.connect('loopback', f.secrets); assert.equal((await exec(c, 'fixture')).stdout, 'SSH_FIXTURE_OK'); c.close();
+  assert.equal(f.server.answers.filter(answer => answer[0] === 'wrong').length, 1, 'no automatic wrong-password retries');
+});
+test('keyboard-interactive verification codes never receive the login password', async t => {
+  for (const interactivePrompt of ['Verification code: ', 'One-time password: ']) {
+    const f = await setup(t, {keyboardOnly: true, interactivePrompt}); await f.trust();
+    await assert.rejects(f.connector.connect('loopback', f.secrets), {code: 'SSH_INTERACTIVE_UNSUPPORTED'});
+    assert.ok(f.server.answers.every(answer => !answer.includes('test-password')));
+  }
 });

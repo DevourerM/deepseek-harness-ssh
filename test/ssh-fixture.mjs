@@ -5,12 +5,16 @@ import {join, relative, resolve, sep} from 'node:path';
 import {connect as tcpConnect} from 'node:net';
 
 // Real encrypted SSH/SFTP server on loopback. Virtual POSIX paths map to a temporary directory.
-export async function sshFixture(root, {onExec, password = 'test-password', hostKey, authorizedKey} = {}) {
+export async function sshFixture(root, {onExec, password = 'test-password', hostKey, authorizedKey, keyboardOnly = false, interactivePrompt = 'Password: '} = {}) {
   const key = hostKey || generateKeyPairSync('rsa', {modulusLength: 2048}).privateKey.export({format: 'pem', type: 'pkcs1'});
-  const connections = new Set(), processes = new Set(), forwards = new Set(); let execCount = 0;
+  const connections = new Set(), processes = new Set(), forwards = new Set(), answers = []; let execCount = 0;
   const server = new ssh2.Server({hostKeys: [key]}, client => {
     connections.add(client); client.on('error', () => {}); client.once('close', () => connections.delete(client));
     client.on('authentication', ctx => {
+      if (keyboardOnly) {
+        if (ctx.method !== 'keyboard-interactive') return ctx.reject(['keyboard-interactive']);
+        return ctx.prompt([{prompt: interactivePrompt, echo: false}], response => { answers.push(response); if (response[0] === password) ctx.accept(); else ctx.reject(['keyboard-interactive']); });
+      }
       if (ctx.username === 'tester' && ctx.method === 'password' && ctx.password === password) return ctx.accept();
       if (ctx.username === 'tester' && ctx.method === 'publickey' && authorizedKey && ctx.key.data.equals(authorizedKey)) {
         const parsed = ssh2.utils.parseKey(ctx.key.data);
@@ -59,7 +63,7 @@ export async function sshFixture(root, {onExec, password = 'test-password', host
     });
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  return {port: server.address().port, key, connections, processes, get execCount() { return execCount; },
+  return {port: server.address().port, key, connections, processes, answers, get execCount() { return execCount; },
     drop: () => { for (const c of connections) c.end(); },
     close: async () => { for (const p of processes) p.kill(); for (const socket of forwards) socket.destroy(); for (const c of connections) c.end(); await new Promise(resolve => server.close(resolve)); }};
 }

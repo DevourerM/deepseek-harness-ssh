@@ -8,13 +8,13 @@ DeepSeek Harness 的标准 SSH 插件。在新建工作区时选择本地或远�
 
 ## 在软件中安装
 
-发行文件：`dist/deepseek-harness-ssh-0.1.0.tgz`。
+发行文件：`dist/deepseek-harness-ssh-0.1.1.tgz`。
 
 1. 打开 DSH **插件 → 添加插件**。
 2. 在“包名或地址”填写 `.tgz` 的本机绝对路径，例如：
 
    ```text
-   D:\code\dsh-plugin\deepseek-harness-ssh\dist\deepseek-harness-ssh-0.1.0.tgz
+   D:\code\dsh-plugin\deepseek-harness-ssh\dist\deepseek-harness-ssh-0.1.1.tgz
    ```
 
 3. 安装并点击 **立即启用**；如宿主提示重启，按提示操作。
@@ -53,6 +53,7 @@ Host *
 - 仅支持上例指令及 `IdentityAgent none`。首个匹配值优先；支持 `Host *` 默认值、多个确切别名、注释、引号及 `Key=Value`。不支持通配 Host、Include、ProxyCommand 或任意本地命令。
 - `IdentityFile` 指向本机私钥，可引用既有 SSH 密钥。配置私钥时默认不尝试 Agent；否则默认使用本机 SSH Agent。Windows 支持 OpenSSH Agent 管道。Agent 不转发给远端。
 - 使用密码或加密私钥时，展开“临时认证”，输入密码或口令；跳板机有独立输入框。内容只存在界面与操作内存中，不写入配置，不使用浏览器持久存储。关闭窗口后需重新输入。
+- 也可直接点击检查连接、浏览或连接：缺少密码/私钥口令时会出现认证表单，提交后继续刚才的操作；密码错误可手动重输，不会自动反复尝试。支持单个密码提示的 keyboard-interactive 服务器，验证码提示不会接收登录密码。断线重连也可在原位输入密码。
 - 首次连接会显示 SHA256 指纹。请向管理员核对后点击“指纹一致，信任并继续”；已信任指纹变化时阻止连接。指纹库为插件独立的 `known-hosts.json`。
 - 设置 `NodePath` 为远端 Node 可执行文件的绝对路径，可解决非交互 SSH 环境未加载 nvm 等 PATH 的问题；运行时安装仍需要 PATH 中有 npm。
 
@@ -83,7 +84,7 @@ Host *
 - SSH 与远端 DSH 都只监听回环地址。远端 Host 增加指定本地隧道端口的 Host 信任，仍使用 DSH 原生启动 token、Cookie、Origin 校验和审批机制。
 - 本地 HTTP 网关通过 SSH 转发请求；为兼容桌面 `dsh-app://` 的跨站嵌入，仅将原生登录 Cookie 转为 `HttpOnly; SameSite=None; Secure; Partitioned`，由浏览器按顶层站点隔离。网关不保存/伪造登录 Cookie，不注入认证，其他站点和未登录请求仍需远端原生认证。要求支持分区 Cookie 的现代 Chromium（DSH 0.2.1-rc.3 的桌面浏览器）。
 - 同时最多连接 4 个远程工作区；断开会停止本插件启动的远端 Host，远端磁盘数据保留。网络中断后的进程回收依赖远端 SSH 会话 EOF / 信号传播；插件不能对远端突然断电提供进程回收保证。
-- 首版不支持远端 Windows、交互 MFA / keyboard-interactive、任意 OpenSSH 指令、端口转发规则编辑、X11、Agent 转发、会话在本地与远端之间迁移。
+- 当前不支持远端 Windows、多轮 MFA / 验证码、任意 OpenSSH 指令、端口转发规则编辑、X11、Agent 转发、会话在本地与远端之间迁移。
 - 远端原生插件需另行安装。涉及浏览器弹窗、原生桌面专属能力、Office 转换等依赖功能，以远端 DSH 与浏览器环境支持情况为准。
 
 ## 开发与验证
@@ -101,3 +102,7 @@ npm run pack:plugin
 核心测试建立本地真实加密 SSH/SFTP 服务，无需外部电脑。宿主与 UI 测试需要合法的 DSH 0.2.1-rc.3 运行时，设置 `DSH_DEV_RUNTIME` 为 `node_modules` 路径；UI 测试另需 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。测试数据、临时 Host、SSH 服务和截图全部在 `artifacts/`，不会操作用户正在使用的 DSH 配置。
 
 本项目使用独立 Git 仓库，设计与阶段见 [实现计划](docs/PLAN.md)。MIT License；与 DeepSeek 官方无隶属关系。
+
+开发者可用 `node scripts/install-desktop.mjs` 安装到本机 Desktop profile，安装器保留其他插件与现有模型配置，并备份被更新的清单。普通用户仍使用软件的 `.tgz` 安装界面。
+
+远端已有 VS Code Server、但系统 PATH 没有 Node/npm 时，可使用 `node scripts/deploy-server.mjs <已信任的 SSH 别名>`：复制符合版本要求的 Node 到用户独立工具目录、校验并安装 npm，再安装固定版本 DSH；设置中的 `NodePath` 指向该独立 Node。这个开发部署工具只读 OpenSSH 连接资料，不共用或改写其配置。不要把个人连接配置、主机地址或验证产物提交到 Git。

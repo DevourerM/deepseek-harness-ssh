@@ -34,11 +34,15 @@ try {
   const settings = page.locator('.ds-ssh-settings'); await settings.waitFor();
   await settings.getByRole('textbox', {name: 'SSH 连接配置'}).fill(`Host local-ssh-test\n HostName 127.0.0.1\n User tester\n Port ${ssh.port}\n IdentityAgent none`);
   await settings.getByRole('button', {name: '保存配置', exact: true}).click(); await settings.getByText('已保存', {exact: true}).waitFor();
-  await settings.locator('summary').click(); await settings.getByLabel('local-ssh-test 密码', {exact: true}).fill('test-password');
   await settings.getByRole('button', {name: '检查连接', exact: true}).click();
   await settings.getByText('确认远端主机身份', {exact: true}).waitFor();
   await page.screenshot({path: join(artifacts, 'ssh-host-trust.png'), fullPage: true});
   await settings.getByRole('button', {name: '指纹一致，信任并继续'}).click();
+  await settings.getByLabel('SSH 登录密码', {exact: true}).fill('wrong-first-attempt');
+  await settings.getByRole('button', {name: '验证并继续', exact: true}).click();
+  await settings.getByText('认证未通过，请重新输入', {exact: true}).waitFor();
+  await settings.getByLabel('SSH 登录密码', {exact: true}).fill('test-password');
+  await settings.getByRole('button', {name: '验证并继续', exact: true}).click();
   await settings.getByText('连接检查通过，可创建远程工作区', {exact: true}).waitFor();
   await writeFile(join(artifacts, 'settings-geometry.json'), JSON.stringify(await settings.evaluate(node => [...node.querySelectorAll('details,details p,select')].map(el => ({tag: el.tagName, rect: el.getBoundingClientRect().toJSON(), whiteSpace: getComputedStyle(el).whiteSpace, width: getComputedStyle(el).width, minWidth: getComputedStyle(el).minWidth}))), null, 2));
   await page.screenshot({path: join(artifacts, 'ssh-settings.png'), fullPage: true});
@@ -48,8 +52,9 @@ try {
   const dialog = page.getByRole('dialog', {name: '新建工作区'}); await dialog.waitFor();
   await page.screenshot({path: join(artifacts, 'ssh-workspace-choice.png'), fullPage: true});
   await dialog.getByRole('button', {name: /远程文件夹/}).click();
-  await dialog.locator('summary').click(); await dialog.getByLabel('local-ssh-test 密码', {exact: true}).fill('test-password');
   await dialog.getByRole('button', {name: '浏览目录', exact: true}).click();
+  await dialog.getByLabel('SSH 登录密码', {exact: true}).fill('test-password');
+  await dialog.getByRole('button', {name: '验证并继续', exact: true}).click();
   await dialog.getByRole('button', {name: '▸ project 空格', exact: true}).click();
   await page.waitForFunction(() => [...document.querySelectorAll('.ds-ssh-dialog input')].some(n => n.value === '/project 空格'));
   await assert.equal(await dialog.getByLabel('远程目录', {exact: true}).inputValue(), '/project 空格');

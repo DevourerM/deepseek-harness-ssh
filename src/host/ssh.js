@@ -6,6 +6,11 @@ import {SshError, localPath} from './config.js';
 
 export const fingerprintOf = key => 'SHA256:' + createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
 export const endpointOf = host => `[${host.hostname}]:${host.port}`;
+function authenticationError(host, secret, kind = 'password', failed = false) {
+  const label = kind === 'passphrase' ? '私钥口令' : '登录密码';
+  return new SshError(failed ? `${host.alias} 的${label}验证失败，请重新输入` : `${host.alias} 需要输入${label}`, failed ? 'SSH_AUTH_FAILED' : 'SSH_AUTH_REQUIRED',
+    {alias: host.alias, username: host.username, hostname: host.hostname, kind});
+}
 export const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
 export function nodeCommand(host, fn, args = []) {
   const script = `(${fn.toString()})(...JSON.parse(Buffer.from('${Buffer.from(JSON.stringify(args)).toString('base64')}','base64').toString('utf8')))`;
@@ -34,17 +39,27 @@ export class SshConnector {
         const sock = previous ? await call(previous, 'forwardOut', '127.0.0.1', 0, item.hostname, item.port) : undefined;
         const client = new ssh2.Client(); client.on('error', () => {}); clients.push(client); this.active.add(client);
         const known = await this.store.known(), endpoint = endpointOf(item), secret = secrets[item.alias] ?? {};
-        let verification;
+        let verification, interactiveError, keyboardUsed = false;
         const privateKey = item.identityFile ? await readFile(localPath(item.identityFile)) : undefined;
         const agent = item.identityAgent === 'none' ? undefined : item.identityAgent === 'default' ? (process.env.SSH_AUTH_SOCK || (process.platform === 'win32' ? '\\\\.\\pipe\\openssh-ssh-agent' : undefined)) : localPath(item.identityAgent);
         await new Promise((resolve, reject) => {
           let ready = false;
-          client.on('error', error => { if (!ready) reject(verification || new SshError(`SSH ${item.alias}：${error.message}`, 'SSH_CONNECT')); });
+          client.on('error', error => { if (!ready) reject(verification || interactiveError || (error.level === 'client-authentication' ? authenticationError(item, secret, 'password', !!secret.password) : new SshError(`SSH ${item.alias}：${error.message}`, 'SSH_CONNECT'))); });
           client.once('close', () => { if (!ready) reject(verification || new SshError('SSH 连接在就绪前关闭', 'SSH_CLOSED')); });
           client.once('ready', () => { ready = true; resolve(); });
-          client.connect({host: item.hostname, port: item.port, username: item.username, sock,
+          client.on('keyboard-interactive', (_name, _instructions, _language, prompts, finish) => {
+            if (!prompts.length) { finish([]); return; }
+            if (prompts.length === 1 && prompts[0].echo === false && /password|密码|口令/i.test(prompts[0].prompt)
+              && !/one[\s-]*time|otp|verification|token|passcode|2fa|mfa|验证码|动态|一次性|安全码/i.test(prompts[0].prompt)) {
+              if (typeof secret.password === 'string' && secret.password && !keyboardUsed) { keyboardUsed = true; finish([secret.password]); return; }
+              interactiveError = authenticationError(item, secret, 'password', keyboardUsed); finish([]); return;
+            }
+            interactiveError = new SshError('服务器要求额外的交互验证（例如验证码）；请先使用私钥，或向管理员确认认证方式。不会把登录密码填入验证码提示。', 'SSH_INTERACTIVE_UNSUPPORTED', {alias: item.alias});
+            finish([]);
+          });
+          try { client.connect({host: item.hostname, port: item.port, username: item.username, sock,
             privateKey, passphrase: secret.passphrase, password: secret.password, agent,
-            tryKeyboard: false, agentForward: false, readyTimeout: item.timeout,
+            tryKeyboard: true, agentForward: false, readyTimeout: item.timeout,
             keepaliveInterval: item.keepalive, keepaliveCountMax: 3,
             hostVerifier: key => {
               const fingerprint = fingerprintOf(key);
@@ -58,7 +73,10 @@ export class SshConnector {
                 verification = new SshError('首次连接：请通过可信渠道核对服务器指纹后确认', 'HOST_KEY_UNKNOWN', {alias: item.alias, endpoint, fingerprint, challengeId});
               }
               return false;
-            }});
+            }}); } catch (error) {
+              if (privateKey && /passphrase|decrypt|encrypted|bad password/i.test(error.message)) reject(authenticationError(item, secret, 'passphrase', !!secret.passphrase));
+              else reject(error);
+            }
         });
         previous = client;
       }

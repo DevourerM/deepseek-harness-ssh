@@ -1,22 +1,52 @@
 {
   "name": "deepseek-harness-ssh",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "SSH remote workspaces for DeepSeek Harness",
   "type": "module",
   "license": "MIT",
   "author": "Snoyi Selew",
-  "repository": {"type": "git", "url": "git+https://github.com/DevourerM/deepseek-harness-ssh.git"},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DevourerM/deepseek-harness-ssh.git"
+  },
   "main": "lib/index.js",
   "icon": "assets/ssh.svg",
-  "exports": {".": "./lib/index.js", "./client": "./lib/client.js", "./package.json": "./package.json", "./cordis.patch.yml": "./cordis.patch.yml"},
-  "files": ["lib", "assets", "docs", "cordis.patch.yml", "README.md", "LICENSE"],
-  "engines": {"node": ">=22.12.0"},
-  "dsh": {
-    "bundle": {"patch": "./cordis.patch.yml"},
-    "client": {"platform": "web", "inject": ["@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-ui-workspace", "@deepseek-ai/dsh-client-ui-settings"]}
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
   },
-  "dependencies": {"ssh2": "1.17.0"},
-  "bundleDependencies": ["ssh2"],
+  "files": [
+    "lib",
+    "assets",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "dependencies": {
+    "ssh2": "1.17.0"
+  },
+  "bundleDependencies": [
+    "ssh2"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.mjs",
