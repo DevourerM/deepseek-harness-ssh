@@ -4,6 +4,7 @@ import {randomUUID} from 'node:crypto';
 import {win32} from 'node:path';
 import {quote, call} from './ssh.js';
 import {installSubagentAdapter} from './subagents.js';
+import {RemoteTerminals, installTerminalAdapter} from './terminals.js';
 
 class Capture {
   bytes = Buffer.alloc(0); total = 0;
@@ -83,6 +84,7 @@ export async function installLocalAdapter(ctx, mounts) {
   const {FsError} = await import('@deepseek-ai/dsh-fs'), {defineTool} = await import('@deepseek-ai/dsh-tools');
   const {RemoteFileSystem, installFileSystem} = await import('./filesystem.js');
   const remote = new RemoteFileSystem(mounts, FsError), processes = new RemoteProcesses(mounts);
+  const terminals = new RemoteTerminals(mounts); installTerminalAdapter(ctx, mounts, terminals);
   const restore = [installFileSystem(ctx, mounts, remote), installSubagentAdapter(ctx, mounts)];
   const patch = (owner, name, factory) => { const descriptor = Object.getOwnPropertyDescriptor(owner, name), old = owner[name].bind(owner); const replacement = factory(old); owner[name] = replacement; restore.push(() => { if (Object.getOwnPropertyDescriptor(owner, name)?.value === replacement) { if (descriptor) Object.defineProperty(owner, name, descriptor); else delete owner[name]; } }); };
   patch(ctx.workspaceRegistry, 'create', old => (path, title, ...args) => {
@@ -91,8 +93,8 @@ export async function installLocalAdapter(ctx, mounts) {
   });
   patch(ctx.subprocess, 'spawn', old => spec => { const route = mounts.route(spec.cwd || ''); return route ? processes.spawn(route.record, spec) : old(spec); });
   patch(ctx.subprocess, 'spawnTerminal', old => spec => {
-    if (mounts.route(spec.cwd || '')) throw Error('此 SSH 工作区请使用 ssh_exec 执行远程命令；当前原生交互终端暂不支持远程目录。');
-    return old(spec);
+    const route = mounts.route(spec.cwd || '');
+    return route ? terminals.spawn(route.record, spec) : old(spec);
   });
   patch(ctx.tools, 'view', old => scope => {
     const result = old(scope); if (!mounts.forAgent(scope)) return result;
@@ -132,5 +134,5 @@ export async function installLocalAdapter(ctx, mounts) {
     return {kind: 'ask', reason: `在 SSH 主机 ${record.alias} 的 ${record.remoteRoot} 执行命令。远程 Shell 不使用本机沙箱，本次需要确认。`};
   }, {prepend: true});
   ctx.systemPrompt.context({name: 'ssh-workspace', order: -90, required: true, text: ({agent}) => { const record = mounts.forAgent(agent); return record ? `This is an SSH workspace on ${record.alias}, remote root ${record.remoteRoot}. Use POSIX file paths and ssh_exec for Bash commands. Native read/write/edit tools access the remote files directly. Never run local PowerShell. No remote DSH or model account is involved.` : ''; }});
-  return () => { processes.dispose(); for (const undo of restore.reverse()) undo(); };
+  return async () => { processes.dispose(); await terminals.dispose(); for (const undo of restore.reverse()) undo(); };
 }

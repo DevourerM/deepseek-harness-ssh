@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-ssh",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Local DeepSeek Harness models with SSH remote folders and file tools",
   "type": "module",
   "license": "MIT",
@@ -58,7 +58,9 @@
     "pack:plugin": "node scripts/build.mjs && node scripts/pack.mjs",
     "test:remote": "node scripts/local-workspace-smoke.mjs",
     "test:files": "node scripts/better-sidebar-smoke.mjs",
-    "test:subagent": "node scripts/subagent-smoke.mjs"
+    "test:subagent": "node scripts/subagent-smoke.mjs",
+    "test:terminal": "node scripts/terminal-smoke.mjs",
+    "test:terminal-ui": "node scripts/terminal-ui-smoke.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-fs": "0.2.1-rc.3",

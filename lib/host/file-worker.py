@@ -143,6 +143,18 @@ def sidebar(q):
 
 def main(q):
     path = q['path']; action = q['action']
+    if action == 'terminal-shells':
+        import pwd
+        if not sys.platform.startswith('linux'): raise ValueError('Interactive SSH terminals currently require Linux')
+        default = pwd.getpwuid(os.getuid()).pw_shell
+        shells, names = [], set()
+        for candidate in [default, 'bash', 'zsh', 'fish', 'sh']:
+            executable = shutil.which(candidate)
+            if not executable: continue
+            name = os.path.basename(executable)
+            if name in names or name in ('nologin', 'false'): continue
+            names.add(name); shells.append(dict(path=executable, name=name, args=['-i']))
+        return dict(shells=shells)
     if action == 'sidebar': return sidebar(q)
     if action == 'resolve': return dict(path=os.path.realpath(path))
     if action in ('stat', 'lstat'): return describe(path, action == 'stat')
