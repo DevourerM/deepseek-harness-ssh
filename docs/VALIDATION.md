@@ -1,3 +1,18 @@
+# 0.4.1 宿主兼容验证（2026-10-30）
+
+环境：Windows、本地 Node 24.17.0；桌面端已升级到官方 DSH **0.2.1-rc.5**（`resources/app.asar` 内 `@deepseek-ai/dsh-desktop` 与自带 CLI 均为 0.2.1-rc.5）。测试使用从 app.asar 解出的官方 rc.5 运行时 `../tree-chat/research/compat-0.2.1-rc.5/dsh/node_modules`（gitignored，`@deepseek-ai/dsh/lib/bin.js --version` 为 0.2.1-rc.5）；rc.3 运行时保留作为回退。未安装到真实 `%USERPROFILE%\.dsh` profile，未修改或重启正在运行的桌面应用。
+
+- 宿主兼容性：`@deepseek-ai/dsh-fs`、`@deepseek-ai/dsh-tools` 的 peerDependencies 从精确 `0.2.1-rc.3` 改为 `>=0.2.0-rc.2 <0.3.0 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5`；`package-lock.json` 镜像字段同步。直接调用 rc.5 运行时的 `evaluatePluginCompatibility`：旧范围对 0.2.1-rc.5 返回未满足要求，新范围对 0.2.1-rc.5 与 0.2.1-rc.3 均返回兼容（`undefined`）。未添加 `engines.dsh`。
+- `npm run build`：通过，`lib/` 由 `src/` 重新生成。
+- `npm test`：**32 项通过、0 失败**。
+- `npm run test:host`（不设置 `DSH_DEV_RUNTIME`，默认解析 rc.5 运行时）：通过；宿主日志无 “incompatible / skipping profile bundle” 或模块解析失败；配置 API 鉴权、保存、版本冲突、无效配置拒绝均通过。结果 `artifacts/host-result.json` 记录 `"host": "0.2.1-rc.5"`。
+- `npm run pack:plugin`：通过；生成 `dist/deepseek-harness-ssh-0.4.1.tgz`（228 个条目，6 个 bundled 纯 JS SSH 依赖）。最终 tgz 的 `sha256` 由 `pack.mjs` 写入 `dist/checksums.json` 并随任务报告提交；本文件本身随发行包分发，因此不在正文内嵌自身压缩包的哈希。
+- `npm run test:install`（真实 Plugins UI，隔离 DSH_HOME + rc.5 运行时 + 系统 Chrome）：通过。tgz 经真实界面安装并点击“立即启用”，`profiles/web/node_modules/deepseek-harness-ssh` 版本 0.4.1；启用后 `POST /api/dsh-ssh {action:'config'}` 返回 200（证明 Host 入口真实激活，而非仅出现设置页），SSH 设置页可见，浏览器无页面错误，宿主日志无兼容性/激活警告。结果 `artifacts/install-result.json` 记录 `"host": "0.2.1-rc.5"`、`hostActive: true`。
+- 版本记录：`scripts/env.mjs` 默认解析 `research/compat-0.2.1-rc.5/dsh/node_modules` 并回退 rc.3；`host-smoke.mjs`、`ui-install.mjs`、`ui-smoke.mjs` 不再硬编码宿主版本，改为读取运行时 `@deepseek-ai/dsh/package.json` 的 `version`。
+- 隔离安装测试根因修复：此前把 DSH_HOME 放在插件仓库 `artifacts/` 下时，profile 位于本仓库包目录内，Node 的包自引用（self-reference，仓库 `package.json` 的 name 即 `deepseek-harness-ssh`）会让 HMR 重新加载插件时把裸包名解析回本仓库 `lib/index.js`，产生 `Cannot find package '@deepseek-ai/dsh-fs' imported from D:\...\deepseek-harness-ssh\lib\host\processes.js`。真实用户 DSH_HOME 不在插件包内，不会触发；测试已把隔离 home 移到系统临时目录，并新增“Host API 返回 200 / 无激活警告”断言，避免设置页出现即误判通过。
+- 旧版远端 Host 协议常量：`src/host/remote.js` 的 `RUNTIME_VERSION` 保持 `0.2.1-rc.3`，不改。该文件与 `manager.js`、`gateway.js` 属于 0.1.x 远端 Host 架构，`scripts/build.mjs`/`pack.mjs` 明确不把它们放进 `lib/` 或发行包（pack 断言不存在），`test/integration-fixture.mjs` 与 `ssh.test.mjs` 中的假远端版本也保持 rc.3；本机 Host 架构（0.4.x）不依赖远端 DSH 运行时，修改它只会制造未经验证的远端部署声明。`scripts/diagnose-server.mjs`、`verify-server.mjs`、`probe-server.mjs` 是可选真实服务器脚本，仍指向服务器上已部署的 rc.3 运行时。
+- 跳过项：需要真实远端 SSH 服务器的可选套件（`test:remote`、`test:files`、`test:terminal`、`test:terminal-ui`、`test:subagent`、`native-smoke`）本次未重跑。它们是 0.4.0 发布的既有验证记录，本次变更只涉及宿主 peer 范围与验证脚本，宿主侧 rc.5 包与 rc.3 除版本字符串外一致；服务器当前可达（`ssh ... echo SSH_OK` 通过），但按要求不作为 0.4.1 的通过条件，也不把旧记录当作本轮结果。
+
 # 0.4.0 新增验证（2026-10-27）
 
 - `npm test`（32 项通过）：新增终端分片数据/中文传输、输入/缩放/前台信号、关闭等待远端退出、断线拒绝未完成操作与保守活动状态，以及原生终端的远程 Shell/目录作用域、本机透传和卸载恢复。

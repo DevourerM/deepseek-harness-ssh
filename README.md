@@ -2,7 +2,9 @@
 
 把远程文件夹加入**本地 DSH** 的工作区列表。本地模型和账号通过 SSH 直接读取、写入、编辑远程文件，在远程目录执行命令；聊天、模型设置与会话保存在本机。
 
-0.4.0 使用本地 Host 架构。远端只需要 **SSH、SFTP、POSIX 环境与 Python 3**，无需配置模型账号、安装 DSH、Node 或 npm。已实机验证 Windows 本机 + Rocky Linux 9 远端、DSH **0.2.1-rc.3**。其他宿主版本和 macOS 远端尚未实机验证。
+0.4.1 使用本地 Host 架构。远端只需要 **SSH、SFTP、POSIX 环境与 Python 3**，无需配置模型账号、安装 DSH、Node 或 npm。Windows 本机 + Rocky Linux 9 远端已在 DSH **0.2.1-rc.3** 上实机验证；0.4.1 用官方 DSH **0.2.1-rc.5** 运行时验证了宿主加载、单元测试、Host API 与真实插件界面安装/启用（宿主兼容范围同时保留 0.2.1-rc.3）。其他宿主版本和 macOS 远端尚未实机验证。
+
+0.4.1 只更新宿主兼容范围与验证脚本，插件行为与 0.4.0 相同：`@deepseek-ai/dsh-fs`、`@deepseek-ai/dsh-tools` 的 peer 范围接受 DSH 0.2.1-rc.5，开发运行时默认使用 rc.5，安装测试会校验宿主插件真实启用。
 
 0.4.0 接入原有右侧栏的**新建终端**。SSH 工作区会列出服务器的 Shell，在远程当前目录启动 Linux PTY，支持交互输入、中文、窗口缩放、Ctrl+C、退出码和关闭时的进程清理，修复远端目录被交给 Windows 本机 Shell 导致的退出码 267。终端需要 Linux `/proc`、Python 标准库与可用的交互 Shell。
 
@@ -13,7 +15,7 @@
 1. 打开 DSH **插件 → 添加插件**，在“包名或地址”填写安装包绝对路径：
 
    ```text
-   D:\code\dsh-plugin\deepseek-harness-ssh\dist\deepseek-harness-ssh-0.4.0.tgz
+   D:\code\dsh-plugin\deepseek-harness-ssh\dist\deepseek-harness-ssh-0.4.1.tgz
    ```
 
 2. 安装并选择 **立即启用**，按宿主提示重启。
@@ -86,7 +88,7 @@ npm run pack:plugin
 npm run test:install
 ```
 
-宿主测试需要 DSH 0.2.1-rc.3 运行时，通过 `DSH_DEV_RUNTIME` 指定其 `node_modules`。UI 测试需要 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。`npm run test:remote` 读取本机忽略的 `artifacts/real-server/config` 与独立主机指纹，在服务器专用验证目录运行本地模拟模型及真实 SSH 文件测试，不请求外部模型。
+宿主测试需要 DSH 0.2.1-rc.5 运行时（兼容 0.2.1-rc.3），通过 `DSH_DEV_RUNTIME` 指定其 `node_modules`；未设置时默认使用 `../tree-chat/research/compat-0.2.1-rc.5/dsh/node_modules`，并回退到 rc.3。集成脚本会把实际读到的宿主版本写入 `artifacts/*-result.json`。UI 测试需要 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。`npm run test:install` 在隔离 `DSH_HOME`（位于系统临时目录，避免 Node 包自引用）中通过真实插件界面安装并立即启用 tgz，校验宿主插件 API 真实可用后再打开 SSH 设置页。`npm run test:remote` 读取本机忽略的 `artifacts/real-server/config` 与独立主机指纹，在服务器专用验证目录运行本地模拟模型及真实 SSH 文件测试，不请求外部模型。
 
 远程文件页支持 UTF-8 文本编辑（保留 BOM 和 CRLF），超过 5 MiB 的文本分页只读；上传与保存上限 8 MiB，单次媒体读取/下载上限 16 MiB。非 UTF-8 文件不会按 UTF-8 覆写。文件页受当前会话权限及远端工作区路径边界约束。
 

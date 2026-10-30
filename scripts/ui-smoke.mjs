@@ -3,11 +3,12 @@ import {mkdir, mkdtemp, writeFile} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {request as httpRequest} from 'node:http';
-import {root, artifacts} from './env.mjs';
+import {root, artifacts, runtimeVersion} from './env.mjs';
 import {prepareHome, startHost} from './host-fixture.mjs';
 import {sshFixture} from '../test/ssh-fixture.mjs';
 
 await mkdir(artifacts, {recursive: true}); const home = await mkdtemp(join(artifacts, 'ui-home-'));
+const hostVersion = runtimeVersion();
 const remoteRoot = await mkdtemp(join(artifacts, 'remote-files-')); await mkdir(join(remoteRoot, 'project 空格'));
 await writeFile(join(remoteRoot, 'project 空格', 'remote-proof.txt'), 'DSH SSH remote file preview verification\n');
 const ssh = await sshFixture(remoteRoot, {onExec: (_command, stream) => {stream.write('3.9.21\n'); stream.exit(0); stream.end();}});
@@ -64,7 +65,7 @@ try {
   await dialog.waitFor({state: 'hidden'});
   assert.equal(await page.locator('iframe').count(), 0);
   assert.deepEqual(errors, []);
-  await writeFile(join(artifacts, 'ui-result.json'), JSON.stringify({host: '0.2.1-rc.3', settings: true, hostTrust: true, missingPasswordPrompt: true, wrongPasswordRetry: true, sftpUnicodeBrowser: true, localWorkspaceCreation: true, noIframe: true, pageErrors: errors}, null, 2));
+  await writeFile(join(artifacts, 'ui-result.json'), JSON.stringify({host: hostVersion, settings: true, hostTrust: true, missingPasswordPrompt: true, wrongPasswordRetry: true, sftpUnicodeBrowser: true, localWorkspaceCreation: true, noIframe: true, pageErrors: errors}, null, 2));
   console.log('PASS: native settings, host trust, password prompt and retry, Unicode SFTP browse and local folder creation.');
 } catch (e) {
   await writeFile(join(artifacts, 'ui-failure.txt'), await page.locator('body').innerText().catch(() => 'page closed'));
