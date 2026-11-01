@@ -12,7 +12,7 @@ import {exec, quote} from '../src/host/ssh.js';
 import {RemoteProcesses} from '../src/host/processes.js';
 
 await mkdir(artifacts, {recursive: true});
-const home = await mkdtemp(join(artifacts, 'local-workspace-'));
+const home = await mkdtemp(join(tmpdir(), 'dsh-ssh-files-'));
 const store = new ConfigStore(join(artifacts, 'real-server')); const config = await store.get(), alias = config.hosts[0].alias;
 const mounts = new Mounts(store), c = await mounts.connect(alias), remoteHome = (await mounts.browse(alias, '.')).path;
 const folder = remoteHome + '/.dsh-ssh/validation/local-' + Date.now();
@@ -49,7 +49,7 @@ async function action(input) {
   while (true) { const {data} = await auth.api({action: 'poll', jobId: response.data.jobId}); if (data.done) { if (data.error) throw Object.assign(Error(data.error.message), data.error); return data.result; } await new Promise(r => setTimeout(r, 200)); }
 }
 const {chromium} = await import(pathToFileURL(process.env.SSH_PLAYWRIGHT || resolve(root, '../tree-chat/artifacts/browser-tools/node_modules/playwright/index.mjs')).href);
-const browser = await chromium.launch({headless: true}); const page = await browser.newPage({viewport: {width: 1440, height: 960}}), errors = [];
+const browser = await chromium.launch({headless: true, ...(process.env.SSH_CHROMIUM ? {executablePath: process.env.SSH_CHROMIUM} : {})}); const page = await browser.newPage({viewport: {width: 1440, height: 960}}), errors = [];
 const watchFrames=[];page.on('websocket',socket=>{if(socket.url().includes('/sidebar/ws/fs-watch'))socket.on('framereceived',frame=>{try{watchFrames.push(JSON.parse(frame.payload));}catch{}});});
 page.setDefaultTimeout(30000); page.on('pageerror', e => errors.push(e.message)); page.on('console', msg => { if (msg.type() === 'error' || msg.type() === 'warning') console.log('Browser:', msg.text()); });
 try {

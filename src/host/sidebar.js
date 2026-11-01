@@ -81,20 +81,22 @@ export function installSidebarAdapter(ctx,mounts){
         if(!session)return route.handler(req,socket,head);
         if(scope.connection.requestRejection(req)!==undefined){socket.destroy();return;}
         sockets.handleUpgrade(req,socket,head,ws=>{
-          const watched=new Map(), pendingPaths=new Set(), control=new AbortController();let timer,closed=false,polling=false;
+          const watched=new Map(), pendingPaths=new Map(), control=new AbortController();let timer,closed=false,polling=false;
           const send=value=>{if(ws.readyState===1)ws.send(JSON.stringify(value));};
           ws.on('error',()=>{});
           ws.on('message',async raw=>{
-            let pending;
+            let pending,initial;
             try{
               const message=JSON.parse(raw.toString());if(typeof message.path!=='string'||message.path.length>4096)return;
-              if(message.op==='unwatch'){watched.delete(message.path);return;}
+              if(message.op==='unwatch'){watched.delete(message.path);pendingPaths.get(message.path)?.abort();pendingPaths.delete(message.path);return;}
               if(message.op!=='watch'||pendingPaths.has(message.path)||(watched.size+pendingPaths.size>=64&&!watched.has(message.path)))return;
-              pending=message.path;pendingPaths.add(pending);
-              const {versions}=await adapter.request(session,'fs.watch',{paths:[message.path]},control.signal);
+              if(watched.has(message.path)){send({dir:message.path,ok:true});return;}
+              pending=message.path;initial=new AbortController();pendingPaths.set(pending,initial);
+              const {versions}=await adapter.request(session,'fs.watch',{paths:[message.path]},AbortSignal.any([control.signal,initial.signal]));
+              if(closed||pendingPaths.get(pending)!==initial||initial.signal.aborted)return;
               if(versions[0].error){send({dir:message.path,ok:false});return;}
-              if(!closed){watched.set(message.path,versions[0].version);send({dir:message.path,ok:true});}
-            }catch{if(!closed)send({dir:'',ok:false});}finally{if(pending)pendingPaths.delete(pending);}
+              if(!closed&&pendingPaths.get(pending)===initial&&!initial.signal.aborted){watched.set(message.path,versions[0].version);send({dir:message.path,ok:true});}
+            }catch{if(!closed&&!initial?.signal.aborted)send({dir:pending||'',ok:false});}finally{if(pendingPaths.get(pending)===initial)pendingPaths.delete(pending);}
           });
           const poll=async()=>{
             if(closed||polling||!watched.size)return;polling=true;
@@ -104,7 +106,7 @@ export function installSidebarAdapter(ctx,mounts){
             }catch{}finally{polling=false;}
           };
           timer=setInterval(poll,2500);timer.unref();
-          ws.once('close',()=>{closed=true;control.abort();clearInterval(timer);watched.clear();});
+          ws.once('close',()=>{closed=true;control.abort();clearInterval(timer);watched.clear();pendingPaths.clear();});
         });
       }};
     };

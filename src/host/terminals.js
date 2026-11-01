@@ -1,6 +1,6 @@
 import {PassThrough} from 'node:stream';
 import {readFile} from 'node:fs/promises';
-import {quote, call} from './ssh.js';
+import {quote, openSession} from './ssh.js';
 
 export class RemoteTerminal {
   output = new PassThrough(); pending = new Map(); sequence = 0; running = true; quiescent = false;
@@ -98,7 +98,7 @@ export class RemoteTerminals {
     const source = await readFile(new URL('./terminal-worker.py', import.meta.url), 'utf8');
     const code = `import base64;exec(base64.b64decode('${Buffer.from(source).toString('base64')}'))`;
     const query = {argv: spec.argv, cwd: route.path, env, terminalType: spec.terminalType, cols: spec.cols, rows: spec.rows, graceMs: spec.graceMs};
-    const channel = await call(connection.client, 'exec', `python3 -u -c ${quote(code)} ${quote(Buffer.from(JSON.stringify(query)).toString('base64'))}`);
+    const channel = await openSession(connection.client, 'exec', [`python3 -u -c ${quote(code)} ${quote(Buffer.from(JSON.stringify(query)).toString('base64'))}`], {kind: 'persistent', signal: spec.signal});
     const terminal = new RemoteTerminal(channel, spec); this.handles.add(terminal);
     terminal.done.finally(() => this.handles.delete(terminal)).catch(() => {});
     await terminal.ready.promise; spec.signal?.throwIfAborted();

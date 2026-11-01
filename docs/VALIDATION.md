@@ -1,3 +1,12 @@
+# 0.4.2 通道并发与自动恢复（2026-11-01）
+
+- `npm test`：42 项通过。新增按真实 close 释放通道、8 个长连接下文件/控制通道容量、前台与后台优先级、取消排队及迟到通道回收、安全重试边界、连接关闭清理、排队计入超时、目录观察取消与重复观察去重。
+- 本机真实加密 SSH/SFTP 服务把 MaxSessions 限制为 2：先用未调度请求复现 Channel open failure，再验证 36 个混合 exec/SFTP 请求自动完成；另注入前两次开通道拒绝，40 个侧栏目录/观察请求全部成功，写操作实际执行一次。测试服务按协议完成通道关闭确认。
+- `npm run test:channel-stress`：真实 Linux 服务器上保持 8 个 SSH PTY，同时发起 40 个侧栏目录/观察请求，全部成功且终端保持连接；再用 7 个终端加 1 个长命令占满长任务预算，追加 40 个文件请求，控制通道及时终止长命令，所有读取完成。远端只读取现有目录，不改项目文件；测试连接独立于桌面应用。
+- `npm run test:host`：官方 DSH 0.2.1-rc.5 加载插件及原生 API 鉴权、配置保存与校验通过。
+- `npm run test:files`：官方 rc.5 隔离 Host、系统 Chrome、实际 better-sidebar 与真实服务器验证原文件页浏览、编辑保存、自动刷新、冲突/边界/认证检查及切回本机文件。结果通过，浏览器无错误；测试 home 移到系统临时目录并支持 SSH_CHROMIUM。
+- 发行包包含新增 channels.js 调度模块；保留 rc.5/rc.3 宿主兼容范围。
+
 # 0.4.1 宿主兼容验证（2026-10-30）
 
 环境：Windows、本地 Node 24.17.0；桌面端已升级到官方 DSH **0.2.1-rc.5**（`resources/app.asar` 内 `@deepseek-ai/dsh-desktop` 与自带 CLI 均为 0.2.1-rc.5）。测试使用从 app.asar 解出的官方 rc.5 运行时 `../tree-chat/research/compat-0.2.1-rc.5/dsh/node_modules`（gitignored，`@deepseek-ai/dsh/lib/bin.js --version` 为 0.2.1-rc.5）；rc.3 运行时保留作为回退。未安装到真实 `%USERPROFILE%\.dsh` profile，未修改或重启正在运行的桌面应用。

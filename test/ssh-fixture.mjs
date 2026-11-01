@@ -5,9 +5,9 @@ import {join, relative, resolve, sep} from 'node:path';
 import {connect as tcpConnect} from 'node:net';
 
 // Real encrypted SSH/SFTP server on loopback. Virtual POSIX paths map to a temporary directory.
-export async function sshFixture(root, {onExec, password = 'test-password', hostKey, authorizedKey, keyboardOnly = false, interactivePrompt = 'Password: '} = {}) {
+export async function sshFixture(root, {onExec, password = 'test-password', hostKey, authorizedKey, keyboardOnly = false, interactivePrompt = 'Password: ', maxSessions = Infinity, refuseSessions = 0} = {}) {
   const key = hostKey || generateKeyPairSync('rsa', {modulusLength: 2048}).privateKey.export({format: 'pem', type: 'pkcs1'});
-  const connections = new Set(), processes = new Set(), forwards = new Set(), answers = []; let execCount = 0;
+  const connections = new Set(), processes = new Set(), forwards = new Set(), answers = []; let execCount = 0, refusedCount = 0, peakSessions = 0;
   const server = new ssh2.Server({hostKeys: [key]}, client => {
     connections.add(client); client.on('error', () => {}); client.once('close', () => connections.delete(client));
     client.on('authentication', ctx => {
@@ -23,15 +23,28 @@ export async function sshFixture(root, {onExec, password = 'test-password', host
       ctx.reject(['publickey', 'password']);
     });
     client.on('ready', () => {
-      client.on('session', accept => {
+      let sessions = 0;
+      client.on('session', (accept, reject) => {
+        if (sessions >= maxSessions || refuseSessions > 0) { if (refuseSessions > 0) refuseSessions--; refusedCount++; reject(); return; }
+        sessions++; peakSessions = Math.max(peakSessions, sessions);
         const session = accept();
+        let released = false;
+        const release = () => { if (!released) { released = true; sessions--; } };
+        session.once('close', release);
         session.on('exec', (accept, reject, info) => {
           execCount++; const stream = accept(); stream.on('error', () => {});
+          stream.once('close', release);
+          // Like sshd after process exit, finish the session rather than keep
+          // the fixture's unused stdin half open indefinitely.
+          stream.once('finish', () => stream.close());
           if (onExec) onExec(info.command, stream, processes);
           else { stream.write('SSH_FIXTURE_OK'); stream.exit(0); stream.end(); }
+          stream.resume();
         });
         session.on('sftp', accept => {
           const sftp = accept(), handles = new Map(); let next = 1;
+          sftp.once('close', release);
+          sftp.once('end', () => sftp.end());
           const status = (id, code = 4, message = 'Fixture I/O error') => sftp.status(id, code, message);
           const local = path => {
             const posix = Buffer.isBuffer(path) ? path.toString() : path;
@@ -63,7 +76,7 @@ export async function sshFixture(root, {onExec, password = 'test-password', host
     });
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  return {port: server.address().port, key, connections, processes, answers, get execCount() { return execCount; },
+  return {port: server.address().port, key, connections, processes, answers, get execCount() { return execCount; }, get refusedCount() { return refusedCount; }, get peakSessions() { return peakSessions; },
     drop: () => { for (const c of connections) c.end(); },
     close: async () => { for (const p of processes) p.kill(); for (const socket of forwards) socket.destroy(); for (const c of connections) c.end(); await new Promise(resolve => server.close(resolve)); }};
 }

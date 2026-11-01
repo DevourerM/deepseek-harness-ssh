@@ -2,7 +2,7 @@ import {PassThrough} from 'node:stream';
 import {readFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {win32} from 'node:path';
-import {quote, call} from './ssh.js';
+import {quote, openSession} from './ssh.js';
 import {installSubagentAdapter} from './subagents.js';
 import {RemoteTerminals, installTerminalAdapter} from './terminals.js';
 
@@ -24,7 +24,7 @@ export class RemoteProcesses {
       killing = true;
       // OpenSSH servers may ignore SSH channel signal requests. A separate
       // authenticated channel signals the remote supervisor, which owns the group.
-      call(connection.client, 'exec', 'kill -TERM ' + pid).then(channel => {channel.on('error',()=>{});channel.resume();channel.stderr.resume();channel.end();}).catch(()=>{});
+      openSession(connection.client, 'exec', ['kill -TERM ' + pid], {kind: 'control', timeout: 5000}).then(channel => {channel.on('error',()=>{});channel.resume();channel.stderr.resume();channel.end();}).catch(()=>{});
     };
     const stdout = new Capture(spec.stdio?.stdout?.maxBytes), stderr = new Capture(spec.stdio?.stderr?.maxBytes);
     out.on('data', data => stdout.add(data)); err.on('data', data => stderr.add(data)); out.on('error', () => {}); err.on('error', () => {}); input.on('error', () => {});
@@ -47,7 +47,7 @@ export class RemoteProcesses {
       const source = await readFile(new URL('./process-worker.py', import.meta.url), 'utf8');
       const code = `import base64;exec(base64.b64decode('${Buffer.from(source).toString('base64')}'))`;
       const command = `python3 -c ${quote(code)} ${quote(Buffer.from(JSON.stringify({argv, cwd, env, control})).toString('base64'))}`;
-      stream = await call(c.client, 'exec', command);
+      stream = await openSession(c.client, 'exec', [command], {kind: 'persistent', signal: spec.signal});
       if (terminated || spec.signal?.aborted) handle.terminate();
       let pending = Buffer.alloc(0), controlSeen = false;
       stream.on('data', data => out.write(data));

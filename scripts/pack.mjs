@@ -17,6 +17,7 @@ for (let offset = 0; offset + 512 <= tar.length;) {
 for (const name of ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js', 'lib/host/config.js', 'lib/host/ssh.js', 'lib/host/jobs.js', 'lib/host/mounts.js', 'lib/host/filesystem.js', 'lib/host/processes.js', 'lib/host/sidebar.js', 'lib/host/file-worker.py', 'lib/host/process-worker.py', 'assets/ssh.svg', 'README.md', 'LICENSE', 'node_modules/ssh2/lib/index.js', 'node_modules/ws/wrapper.mjs', 'node_modules/asn1/package.json', 'node_modules/bcrypt-pbkdf/package.json', 'node_modules/tweetnacl/package.json', 'node_modules/safer-buffer/package.json']) assert.ok(entries.has('package/' + name), 'Missing package entry: ' + name);
 assert.ok(!entries.has('package/lib/host/gateway.js'));
 assert.ok(entries.has('package/lib/host/subagents.js'), 'Missing SSH subagent cwd adapter');
+assert.ok(entries.has('package/lib/host/channels.js'), 'Missing SSH session channel scheduler');
 assert.ok(entries.has('package/lib/host/terminals.js'), 'Missing SSH terminal adapter');
 assert.ok(entries.has('package/lib/host/terminal-worker.py'), 'Missing remote PTY worker');
 assert.ok(!entries.has('package/lib/host/remote.js'));

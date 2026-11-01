@@ -93,7 +93,7 @@ export class Mounts {
   async request(record, query, signal) {
     const c = await this.ensure(record.alias, signal), source = await readFile(new URL('./file-worker.py', import.meta.url), 'utf8');
     const code = `import base64;exec(base64.b64decode('${Buffer.from(source).toString('base64')}'))`;
-    const result = await exec(c, `python3 -c ${quote(code)}`, {stdin: JSON.stringify(query), signal, timeout: 60000, maxBytes: 24 * 1024 * 1024});
+    const result = await exec(c, `python3 -c ${quote(code)}`, {stdin: JSON.stringify(query), signal, timeout: 60000, maxBytes: 24 * 1024 * 1024, background: query.action === 'sidebar' && query.op === 'fs.watch'});
     let data; try { data = JSON.parse(result.stdout.trim()); } catch { throw new SshError('远端文件系统返回了无效数据', 'FS_IO_ERROR'); }
     if (!data.ok) { const error = new Error(data.message); error.code = data.code; throw error; } return data.value;
   }

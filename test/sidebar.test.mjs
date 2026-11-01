@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Readable} from 'node:stream';
 import {EventEmitter} from 'node:events';
+import {createServer} from 'node:http';
+import WebSocket from 'ws';
 import {SidebarAdapter,installSidebarAdapter} from '../src/host/sidebar.js';
 
 class Response extends EventEmitter {
@@ -35,4 +37,31 @@ test('file compatibility restores route and websocket hooks when the plugin unlo
   const ctx={inject:(_keys,fn)=>fn({...ctx,webServer:server,effect:fn=>cleanup.push(fn())})};
   installSidebarAdapter(ctx,{});assert.notEqual(server.match,match);assert.notEqual(server.upgrades.get(originalWatch.path),originalWatch);
   cleanup.reverse().forEach(fn=>fn());assert.equal(server.match,match);assert.equal(server.registerUpgrade,register);assert.equal(server.upgrades.get(originalWatch.path),originalWatch);
+});
+
+test('collapsed directories cancel pending SSH watches and duplicate watches do not reopen channels',async t=>{
+  const record={id:'r',remoteRoot:'/srv/project',localRoot:'identity'}, requests=[],cleanup=[];
+  const original={path:'/sidebar/ws/fs-watch',handler(){assert.fail('remote watch must use SSH adapter');}};
+  const webServer={match:()=>undefined,registerUpgrade(){},upgrades:new Map([[original.path,original]])};
+  const ctx={sessions:{get:()=>({id:'s',header:{cwd:'identity'}})},connection:{requestRejection:()=>undefined},workingDirectory:{get:()=>'/srv/project'},sandboxPolicy:{resolve:()=>({mode:'read-only'})},
+    inject:(_keys,fn)=>fn({...ctx,webServer,effect:fn=>cleanup.push(fn())})};
+  const mounts={scope:{run:(_record,fn)=>fn()},byPath:()=>record,route:path=>({record,path}),request:(_record,query,signal)=>{const deferred=Promise.withResolvers();requests.push({...deferred,signal,query});return deferred.promise;}};
+  installSidebarAdapter(ctx,mounts);
+  const server=createServer();server.on('upgrade',(req,socket,head)=>webServer.upgrades.get(original.path).handler(req,socket,head));
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  let ws;
+  t.after(async()=>{ws?.terminate();cleanup.reverse().forEach(fn=>fn());await new Promise(resolve=>server.close(resolve));});
+  ws=new WebSocket(`ws://127.0.0.1:${server.address().port}${original.path}?sessionId=s`);
+  const frames=[];ws.on('message',raw=>frames.push(JSON.parse(raw.toString())));
+  await new Promise((resolve,reject)=>{ws.once('open',resolve);ws.once('error',reject);});
+  const until=async condition=>{for(let i=0;i<100;i++){if(condition())return;await new Promise(resolve=>setTimeout(resolve,5));}assert.fail('watch state did not settle');};
+  const send=op=>ws.send(JSON.stringify({op,path:'/srv/project/folder'}));
+  send('watch');await until(()=>requests.length===1);
+  send('unwatch');await until(()=>requests[0].signal.aborted);
+  requests[0].resolve({versions:[{version:'old'}]});await new Promise(resolve=>setTimeout(resolve,10));assert.deepEqual(frames,[]);
+  send('watch');await until(()=>requests.length===2);
+  send('watch');requests[1].resolve({versions:[{version:'current'}]});await until(()=>frames.length>=1);
+  send('watch');await until(()=>frames.length>=2);assert.equal(requests.length,2);
+  send('unwatch');send('watch');await until(()=>requests.length===3);
+  ws.close();await until(()=>requests[2].signal.aborted);requests[2].resolve({versions:[{version:'late'}]});
 });
