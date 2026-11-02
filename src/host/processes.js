@@ -87,9 +87,10 @@ export async function installLocalAdapter(ctx, mounts) {
   const terminals = new RemoteTerminals(mounts); installTerminalAdapter(ctx, mounts, terminals);
   const restore = [installFileSystem(ctx, mounts, remote), installSubagentAdapter(ctx, mounts)];
   const patch = (owner, name, factory) => { const descriptor = Object.getOwnPropertyDescriptor(owner, name), old = owner[name].bind(owner); const replacement = factory(old); owner[name] = replacement; restore.push(() => { if (Object.getOwnPropertyDescriptor(owner, name)?.value === replacement) { if (descriptor) Object.defineProperty(owner, name, descriptor); else delete owner[name]; } }); };
+  const remoteScopedTools = new Set(['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'ssh_exec']);
   patch(ctx.workspaceRegistry, 'create', old => (path, title, ...args) => {
     const record = mounts.byPath(path);
-    return old(path, title || (record ? `SSH · ${record.alias} · ${record.remoteRoot.split('/').at(-1) || '/'}` : title), ...args);
+    return old(path, title || record?.title || (record ? `SSH · ${record.alias} · ${record.remoteRoot.split('/').at(-1) || '/'}` : title), ...args);
   });
   patch(ctx.subprocess, 'spawn', old => spec => { const route = mounts.route(spec.cwd || ''); return route ? processes.spawn(route.record, spec) : old(spec); });
   patch(ctx.subprocess, 'spawnTerminal', old => spec => {
@@ -102,8 +103,9 @@ export async function installLocalAdapter(ctx, mounts) {
     return {...result, visible};
   });
   patch(ctx.workingDirectory, 'ensure', old => (agent, signal) => { const record = mounts.forAgent(agent); return record ? mounts.scope.run(record, async () => { const current = await old(agent, signal); return mounts.route(current)?.path || current; }) : old(agent, signal); });
-  patch(ctx.workingDirectory, 'contextText', old => session => { const record = mounts.byPath(session.header.cwd); const route = record && mounts.route('', ctx.workingDirectory.get(session)); return record ? `Current working directory: ${JSON.stringify(route?.path || record.remoteRoot)} on SSH host ${record.alias}. Files and commands execute remotely. The model, account and conversation are local.` : old(session); });
-  ctx.on('tools/execute', (execution, next) => { const record = mounts.forAgent(execution.agent); return record ? mounts.scope.run(record, next) : next(); }, {prepend: true});
+  patch(ctx.workingDirectory, 'contextText', old => session => { const record = mounts.byPath(session.header.cwd); const route = record && mounts.scope.run(record, () => mounts.route('', ctx.workingDirectory.get(session))); return record ? `Current working directory: ${JSON.stringify(route?.path || record.remoteRoot)} on SSH host ${record.alias}. Files and commands execute remotely. The model, account and conversation are local.` : old(session); });
+  ctx.on('agent/pre-step', (_state, next) => mounts.scope.getStore() ? mounts.scope.run(undefined, next) : next(), {prepend: true});
+  ctx.on('tools/execute', (execution, next) => { const record = remoteScopedTools.has(execution.name) ? mounts.forAgent(execution.agent) : null; return record ? mounts.scope.run(record, next) : mounts.scope.getStore() ? mounts.scope.run(undefined, next) : next(); }, {prepend: true});
   ctx.on('system-prompt/assemble', (assembly, context, next) => { const record = mounts.forAgent(context.agent); return record ? mounts.scope.run(record, next) : next(); }, {prepend: true});
   const installed = new WeakSet();
   const attach = agent => {

@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-ssh",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Local DeepSeek Harness models with SSH remote folders and file tools",
   "type": "module",
   "license": "MIT",

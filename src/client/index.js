@@ -125,24 +125,28 @@ function KnownHost({endpoint, fingerprint, disabled, remove}) {
 function WorkspaceFlow(props) {
   const {ctx, open, onPicked, onCancel} = props;
   const [mode, setMode] = useState('choose'), [config, setConfig] = useState(null), [alias, setAlias] = useState('');
-  const [path, setPath] = useState('~'), [local, setLocal] = useState(''), [listing, setListing] = useState(null), [secrets, setSecrets] = useState({}), [bookmarks, setBookmarks] = useState([]);
+  const [path, setPath] = useState('~'), [local, setLocal] = useState(''), [name, setName] = useState(''), [listing, setListing] = useState(null), [secrets, setSecrets] = useState({}), [bookmarks, setBookmarks] = useState([]);
   const op = useOperation();
-  useEffect(() => { if (open) { setMode('choose'); setListing(null); op.run(async signal => { const data = await api({action: 'config'}, signal); setConfig(data); setAlias(data.hosts[0]?.alias || ''); setBookmarks(await api({action: 'bookmarks'}, signal)); }); } else { op.cancel(); op.clearCredentials(); setSecrets({}); } }, [open]);
+  useEffect(() => { if (open) { setMode('choose'); setName(''); setListing(null); op.run(async signal => { const data = await api({action: 'config'}, signal); setConfig(data); setAlias(data.hosts[0]?.alias || ''); setBookmarks(await api({action: 'bookmarks'}, signal)); }); } else { op.cancel(); op.clearCredentials(); setSecrets({}); setName(''); } }, [open]);
   if (!open) return null;
   const browsePath = target => op.run(async (signal, extra) => { const value = await action({action: 'browse', alias, path: target, secrets: mergeSecrets(secrets, extra)}, signal); setListing(value); setPath(value.path); return value; });
   const close = () => { op.cancel(); onCancel(); };
+  const localDefaultName = local.trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'my-project';
+  const remoteBaseName = path.trim().replace(/\/+$/, '').split('/').pop() || '/';
+  const remoteDefaultName = alias ? `SSH · ${alias} · ${remoteBaseName}` : 'SSH · 主机 · 目录';
   return h('div', {className: 'ds-ssh-backdrop', onKeyDown: e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } }},
     h('div', {className: 'ds-ssh-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': '新建工作区', tabIndex: -1, ref: node => { if (node && !node.contains(document.activeElement)) node.focus(); }},
       h('div', {className: 'ds-ssh-row ds-ssh-dialog-header'}, h('div', null,h('span',{className:'ds-ssh-kicker'},'工作区'), h('h2', null, mode === 'choose'?'你想在哪里工作？':mode === 'remote'?'选择远程文件夹':'选择本地文件夹')), h(Button, {'aria-label': '关闭新建工作区', onClick: close}, '×')),
       mode === 'choose' && h('p',{className:'ds-ssh-muted'},'选择项目所在的位置，继续使用这台电脑上的模型和聊天。'),
       mode === 'choose' && h('div', {className: 'ds-ssh-choices'},
-        h(Button, {disabled: op.busy, onClick: () => setMode('local')}, h('i',{className:'ds-ssh-choice-icon'},h(Icon,{kind:'folder',size:27})),h('strong', null, '本地文件夹'), h('span', null, '在这台电脑上工作'),h('i',{className:'ds-ssh-choice-arrow'},h(Icon,{kind:'arrow',size:18}))),
-        h(Button, {disabled: op.busy, onClick: () => setMode('remote')}, h('i',{className:'ds-ssh-choice-icon'},h(Icon,{kind:'server',size:27})),h('strong', null, '远程文件夹 · SSH'), h('span', null, '连接远程电脑并接管目录'),h('i',{className:'ds-ssh-choice-arrow'},h(Icon,{kind:'arrow',size:18})))),
+        h(Button, {disabled: op.busy, onClick: () => { setName(''); setMode('local'); }}, h('i',{className:'ds-ssh-choice-icon'},h(Icon,{kind:'folder',size:27})),h('strong', null, '本地文件夹'), h('span', null, '在这台电脑上工作'),h('i',{className:'ds-ssh-choice-arrow'},h(Icon,{kind:'arrow',size:18}))),
+        h(Button, {disabled: op.busy, onClick: () => { setName(''); setMode('remote'); }}, h('i',{className:'ds-ssh-choice-icon'},h(Icon,{kind:'server',size:27})),h('strong', null, '远程文件夹 · SSH'), h('span', null, '连接远程电脑并接管目录'),h('i',{className:'ds-ssh-choice-arrow'},h(Icon,{kind:'arrow',size:18})))),
       mode === 'local' && h('div', {className: 'ds-ssh-stack'},
         h('p', null, '选择本机已有文件夹作为工作区。'), h(Field, {label: '本地文件夹绝对路径', value: local, disabled: op.busy, onChange: e => setLocal(e.target.value), placeholder: 'D:\\projects\\my-project'}),
+        h(Field, {label: '工作区名称（可选）', value: name, disabled: op.busy, maxLength: 120, onChange: e => setName(e.target.value), placeholder: `留空默认使用文件夹名（${localDefaultName}）`}),
         h('div', {className: 'ds-ssh-row'},
-          h(Button, {disabled: op.busy, onClick: () => op.run(async () => { const path = await (globalThis.__DSH_DIRECTORY_PICKER__?.pick() ?? ctx.uiWorkspace.pickDirectory()); if (path) setLocal(path); })}, '浏览本地文件夹…'),
-          h(Button, {primary: true, disabled: !local.trim() || op.busy, onClick: () => onPicked(local.trim())}, '创建本地工作区'))),
+          h(Button, {disabled: op.busy, onClick: () => op.run(async () => { const picked = await (globalThis.__DSH_DIRECTORY_PICKER__?.pick() ?? ctx.uiWorkspace.pickDirectory()); if (picked) setLocal(picked); })}, '浏览本地文件夹…'),
+          h(Button, {primary: true, disabled: !local.trim() || op.busy, onClick: () => op.run(async signal => { const targetPath = local.trim(), title = name.trim(); if (title) await api({action: 'rename-workspace', path: targetPath, title}, signal); onPicked(targetPath); })}, '创建本地工作区'))),
       mode === 'remote' && h('div', {className: 'ds-ssh-stack'},
         h('label', {className: 'ds-ssh-field'}, '远程电脑', h('select', {'aria-label': '远程电脑', value: alias, disabled: op.busy, onChange: e => { setAlias(e.target.value); setPath('~'); setListing(null); }},
           h('option', {value: ''}, '请选择'), config?.hosts.map(host => h('option', {key: host.alias, value: host.alias}, `${host.alias} — ${host.username}@${host.hostname}`)))),
@@ -151,14 +155,15 @@ function WorkspaceFlow(props) {
         h(Credentials, {hosts: config?.hosts || [], alias, secrets, setSecrets, disabled: op.busy}),
         h('div', {className: 'ds-ssh-row'}, h(Field, {label: '远程目录', value: path, disabled: op.busy, placeholder: '~/projects', onChange: e => setPath(e.target.value)}),
           h(Button, {disabled: !alias || op.busy, onClick: () => browsePath(path)}, '浏览目录')),
+        h(Field, {label: '工作区名称（可选）', value: name, disabled: op.busy, maxLength: 120, onChange: e => setName(e.target.value), placeholder: `留空默认：${remoteDefaultName}`}),
         listing && h('div', {className: 'ds-ssh-directory'},h('div',{className:'ds-ssh-breadcrumb'},h(Icon,{kind:'folder',size:16}),h('code',null,listing.path),h(Button,{disabled:op.busy,onClick:()=>browsePath('~')},'主目录')),h('div', {className: 'ds-ssh-files', 'aria-label': '远程目录列表'},
           h(Button, {disabled: op.busy, onClick: () => browsePath(listing.path === '/' ? '/' : listing.path.slice(0, listing.path.lastIndexOf('/')) || '/')}, '↑ 上级目录'),
           listing.directories.map(entry => h(Button, {key: entry.name, disabled: op.busy, onClick: () => browsePath((listing.path === '/' ? '' : listing.path) + '/' + entry.name)}, '▸ ' + entry.name + (entry.symlink ? ' ↗' : ''))),
           !listing.directories.length && h('p', {className: 'ds-ssh-empty'}, '此目录中没有子目录，可以直接选择当前目录。'), listing.truncated && h('p', null, '只显示前 2000 个目录，可输入完整路径继续。'))),
         h('p', {className: 'ds-ssh-muted'}, '使用本地模型和聊天，文件直接读写到远程电脑。'),
-        h(Button, {primary: true, disabled: !alias || !path.trim() || op.busy, onClick: () => op.run(async (signal, extra) => { const workspace = await action({action: 'open', alias, path, secrets: mergeSecrets(secrets, extra)}, signal); onPicked(workspace.localRoot); })}, '连接并创建远程工作区')),
+        h(Button, {primary: true, disabled: !alias || !path.trim() || op.busy, onClick: () => op.run(async (signal, extra) => { const workspace = await action({action: 'open', alias, path, ...(name.trim() ? {title: name.trim()} : {}), secrets: mergeSecrets(secrets, extra)}, signal); onPicked(workspace.localRoot); })}, '连接并创建远程工作区')),
       h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value))}),
-      mode !== 'choose' && h(Button, {disabled: op.busy, onClick: () => setMode('choose')}, '返回选择')));
+      mode !== 'choose' && h(Button, {disabled: op.busy, onClick: () => { setName(''); setMode('choose'); }}, '返回选择')));
 }
 function AuthenticationRequest({pending}) {
   const op = useOperation();

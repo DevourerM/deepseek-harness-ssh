@@ -11,6 +11,13 @@ export class LocalManager extends Jobs {
   list() { return this.mounts.list(); }
   get(id) { const record = this.list().find(r => r.id === id); if (!record) throw new SshError('SSH 工作区不存在', 'SESSION_MISSING'); return record; }
   disconnect(id) { const record = this.mounts.records.find(r => r.id === id); return this.mounts.disconnect(record?.alias || id); }
+  async rename(path, title) {
+    if (typeof path !== 'string' || !path.trim()) throw new SshError('请选择本地文件夹路径', 'PATH_MISSING');
+    const customTitle = typeof title === 'string' ? title.trim().slice(0, 120) : '';
+    const workspace = await this.mounts.ctx.workspaceRegistry.create(path.trim(), customTitle || undefined);
+    if (customTitle && workspace.title !== customTitle) await workspace.setTitle(customTitle);
+    return {workspaceId: workspace.id, path: workspace.path, title: workspace.title};
+  }
   install() { throw new SshError('本版本由本地 DSH 直接操作远程文件，不需要安装远端 DSH 或配置远端账号', 'LOCAL_HOST_MODE'); }
   dispose() { this.disposed = true; for (const job of this.jobs.values()) job.controller.abort(); this.mounts.dispose(); }
 }

@@ -81,11 +81,20 @@ test('remote child setup is scoped independently of tools and leaves local deleg
   assert.equal(f.ctx.workingDirectory.set, f.originalSet);
 });
 
-test('remote delegation reaches native ownership admission before yielding', async () => {
+test('remote delegation reaches native ownership admission before yielding and does not leak parent tool scope', async () => {
   const f = fixture();
   f.ctx.workingDirectory.ensure = () => { throw Error('Must not yield before native admission'); };
-  const pending = f.start('child');
-  assert.equal(f.calls.length, 1, 'native admission must acquire its ownership hold synchronously');
-  assert.equal((await pending).cwd, f.record.remoteRoot + '/child');
+  let childPreStepStore = 'unset';
+  const originalStart = f.ctx.subagents.startActivation;
   f.undo();
+  f.ctx.subagents.startActivation = async spec => {
+    childPreStepStore = f.mounts.scope.getStore();
+    return originalStart(spec);
+  };
+  const undo2 = installSubagentAdapter(f.ctx, f.mounts);
+  const pending = f.mounts.scope.run(f.record, () => f.start('child'));
+  assert.equal(f.calls.length, 1, 'native admission must acquire its ownership hold synchronously');
+  assert.equal(childPreStepStore, undefined, 'child activation must not inherit parent tool scope');
+  assert.equal((await pending).cwd, f.record.remoteRoot + '/child');
+  undo2();
 });

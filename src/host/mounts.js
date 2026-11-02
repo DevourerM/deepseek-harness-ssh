@@ -8,12 +8,15 @@ import {SshConnector, browse, exec, quote} from './ssh.js';
 export class Mounts {
   records = []; connections = new Map(); connecting = new Map(); authentication = new Map(); scope = new AsyncLocalStorage(); disposed = false;
   constructor(store, ctx = {}) { this.store = store; this.ctx = ctx; this.ssh = new SshConnector(store); }
-  async init() {
+  init() {
+    return this.initRecords();
+  }
+  async initRecords() {
     try { this.records = JSON.parse(await readFile(join(this.store.root, 'mounts.json'), 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     for (const record of this.records) {
       await mkdir(record.localRoot, {recursive: true});
       const workspace=this.ctx.workspaceRegistry?.get(record.workspaceId);
-      if(workspace?.title===record.id)await workspace.setTitle(`SSH · ${record.alias} · ${posix.basename(record.remoteRoot)||'/'}`);
+      if(workspace?.title===record.id)await workspace.setTitle(record.title||`SSH · ${record.alias} · ${posix.basename(record.remoteRoot)||'/'}`);
     }
   }
   byPath(path) {
@@ -24,9 +27,14 @@ export class Mounts {
   route(path, cwd) {
     const explicit = this.byPath(path), base = this.byPath(cwd);
     const record = explicit || base || this.scope.getStore(); if (!record) return null;
-    if (win32.isAbsolute(path) && /^[a-z]:|^\\\\/i.test(path) && !explicit) throw new SshError('SSH 工作区只接受远端 POSIX 路径，不能回退访问本机路径', 'FS_SANDBOX_DENIED');
+    let normalized = typeof path === 'string' ? path : '';
+    if (win32.isAbsolute(normalized) && /^[a-z]:|^\\\\/i.test(normalized) && !explicit) {
+      const candidate = /^[a-z]:[\\/]/i.test(normalized) ? posix.normalize(normalized.slice(2).replaceAll('\\', '/')) : '';
+      if (record.remoteRoot && record.remoteRoot !== '/' && (candidate === record.remoteRoot || candidate.startsWith(record.remoteRoot + '/'))) normalized = candidate;
+      else throw new SshError('SSH 工作区只接受远端 POSIX 路径，不能回退访问本机路径', 'FS_SANDBOX_DENIED');
+    }
     const remoteCwd = base ? posix.resolve(base.remoteRoot, relative(base.localRoot, cwd).split(sep).join('/')) : typeof cwd === 'string' && cwd.startsWith('/') ? cwd : record.remoteRoot;
-    const remotePath = explicit ? posix.resolve(explicit.remoteRoot, relative(explicit.localRoot, path).split(sep).join('/')) : posix.resolve(remoteCwd, path.replaceAll('\\', '/'));
+    const remotePath = explicit ? posix.resolve(explicit.remoteRoot, relative(explicit.localRoot, normalized).split(sep).join('/')) : posix.resolve(remoteCwd, normalized.replaceAll('\\', '/'));
     return {record, path: remotePath};
   }
   async connect(alias, secrets = {}, signal) {
@@ -62,22 +70,30 @@ export class Mounts {
   }
   authState() { return [...this.authentication.values()].map(({id, alias, error}) => ({id, alias, error})); }
   cancelAuth(id) { const pending = [...this.authentication.values()].find(x => x.id === id); if (pending) { clearTimeout(pending.timer); this.authentication.delete(pending.alias); pending.reject(new SshError('已取消 SSH 认证', 'CANCELLED')); } return {cancelled: !!pending}; }
-  async open(alias, path, secrets, signal) {
+  async open(alias, path, secrets, signal, title) {
     const connection = await this.connect(alias, secrets, signal), directory = await browse(connection, path, {signal});
+    const customTitle = typeof title === 'string' ? title.trim().slice(0, 120) : '';
+    const defaultTitle = `SSH · ${alias} · ${posix.basename(directory.path) || '/'}`;
     let record = this.records.find(r => r.alias === alias && r.remoteRoot === directory.path);
     if (!record) {
       const id = createHash('sha256').update(JSON.stringify([alias, directory.path])).digest('hex').slice(0, 24);
       const localRoot = join(this.store.root, 'workspaces', id); await mkdir(localRoot, {recursive: true});
-      record = {id, alias, remoteRoot: directory.path, localRoot: await (await import('node:fs/promises')).realpath(localRoot)};
-      const workspace = await this.ctx.workspaceRegistry.create(record.localRoot, `SSH · ${alias} · ${posix.basename(directory.path) || '/'}`);
+      const resolvedTitle = customTitle || defaultTitle;
+      record = {id, alias, remoteRoot: directory.path, localRoot: await (await import('node:fs/promises')).realpath(localRoot), ...(customTitle ? {title: customTitle} : {})};
+      const workspace = await this.ctx.workspaceRegistry.create(record.localRoot, resolvedTitle);
+      if (customTitle && workspace.title !== customTitle) await workspace.setTitle(customTitle);
       record.workspaceId = workspace.id; this.records.push(record);
       await atomicWrite(join(this.store.root, 'mounts.json'), JSON.stringify(this.records, null, 2) + '\n');
     } else {
       // The native directory picker re-adopts existing paths. Restore a useful
       // title instead of exposing the local identity directory's hash.
-      const workspace=await this.ctx.workspaceRegistry.create(record.localRoot, `SSH · ${alias} · ${posix.basename(directory.path) || '/'}`);
-      if(workspace.title===record.id)await workspace.setTitle(`SSH · ${alias} · ${posix.basename(directory.path)||'/'}`);
-      if(workspace.id!==record.workspaceId){record.workspaceId=workspace.id;await atomicWrite(join(this.store.root,'mounts.json'),JSON.stringify(this.records,null,2)+'\n');}
+      let dirty = false;
+      if (customTitle && record.title !== customTitle) { record.title = customTitle; dirty = true; }
+      const workspace = await this.ctx.workspaceRegistry.create(record.localRoot, customTitle || record.title || defaultTitle);
+      if (customTitle && workspace.title !== customTitle) await workspace.setTitle(customTitle);
+      else if (workspace.title === record.id) await workspace.setTitle(record.title || defaultTitle);
+      if (workspace.id !== record.workspaceId) { record.workspaceId = workspace.id; dirty = true; }
+      if (dirty) await atomicWrite(join(this.store.root, 'mounts.json'), JSON.stringify(this.records, null, 2) + '\n');
     }
     await this.store.remember(alias, directory.path);
     return {...record, state: 'connected'};

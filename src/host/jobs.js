@@ -17,7 +17,7 @@ export class Jobs {
         case 'check': return this.check(input.alias, input.secrets, signal);
         case 'browse': return this.browse(input.alias, input.path, input.secrets, signal);
         case 'install': return this.install(input.alias, input.secrets, signal);
-        case 'open': return this.open(input.alias, input.path, input.secrets, signal);
+        case 'open': return this.open(input.alias, input.path, input.secrets, signal, input.title);
         case 'connect': return this.connect(input.alias, input.secrets, signal);
         default: throw new SshError('未知的后台操作', 'ACTION_INVALID');
       }

@@ -19,6 +19,7 @@ test('SSH routing isolates local paths, concurrent sessions, and changed POSIX d
     await new Promise(r=>setTimeout(r,1));
     assert.equal(mounts.route('x').record, record);
     assert.equal(mounts.route('x','/srv/subdir').path, '/srv/subdir/x');
+    assert.equal(mounts.route('C:\\srv\\' + record.id + '\\file.txt').path, record.remoteRoot + '/file.txt');
   })));
   assert.equal(mounts.route('x'), null);
   assert.throws(()=>mounts.scope.run(a,()=>mounts.route('C:\\outside\\file.txt')),{code:'FS_SANDBOX_DENIED'});
@@ -26,10 +27,12 @@ test('SSH routing isolates local paths, concurrent sessions, and changed POSIX d
 test('restored SSH workspaces repair generated identity titles and preserve custom names',async()=>{
   const root=await mkdtemp(join(tmpdir(),'ssh-title-')), record={id:'0123456789abcdef01234567',alias:'server',remoteRoot:'/srv/project',localRoot:join(root,'identity'),workspaceId:'workspace'};
   await writeFile(join(root,'mounts.json'),JSON.stringify([record]));
-  const workspace={title:record.id,async setTitle(value){this.title=value;}};
+  const workspace={id:'workspace',title:record.id,async setTitle(value){this.title=value;}};
   const mounts=new Mounts({root},{workspaceRegistry:{get:()=>workspace}});
   await mounts.init();assert.equal(workspace.title,'SSH · server · project');
-  workspace.title='My project';await mounts.init();assert.equal(workspace.title,'My project');mounts.dispose();
+  workspace.title='My project';await mounts.init();assert.equal(workspace.title,'My project');
+  record.title='Custom Saved Title';await writeFile(join(root,'mounts.json'),JSON.stringify([record]));workspace.title=record.id;await mounts.init();assert.equal(workspace.title,'Custom Saved Title');
+  mounts.dispose();
 });
 test('filesystem adapter leaves local calls alone and restores services on unload', async () => {
   const mounts = new Mounts({}); const record = {id:'one',localRoot:join(tmpdir(),'ssh-adapter'),remoteRoot:'/srv/one'}; mounts.records=[record];
@@ -60,6 +63,11 @@ test('password workspace reconnection pauses operations, accepts manual retry, a
     await assert.rejects(()=>mounts.connect('password-test',{'password-test':{password:'wrong-secret'}}),{code:'SSH_AUTH_FAILED'});
     const c=await mounts.connect('password-test',{'password-test':{password:'test-password'}});
     assert.equal(await pending,c);assert.deepEqual(mounts.authState(),[]);
+    const createdWorkspaces=[];
+    mounts.ctx={workspaceRegistry:{create:async(path,title)=>{const w={id:'ws-'+createdWorkspaces.length,path,title,async setTitle(v){this.title=v;}};createdWorkspaces.push(w);return w;}}};
+    const opened=await mounts.open('password-test','.',{},undefined,'My Named SSH Workspace');
+    assert.equal(opened.title,'My Named SSH Workspace');
+    assert.equal(createdWorkspaces[0].title,'My Named SSH Workspace');
     assert.ok(!(await readFile(join(store.root,'config'),'utf8')).includes('test-password'));
     mounts.disconnect('password-test');
     const cancelled=mounts.ensure('password-test');
