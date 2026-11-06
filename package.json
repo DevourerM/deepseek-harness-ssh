@@ -64,8 +64,8 @@
     "test:channel-stress": "node scripts/channel-stress.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-fs": ">=0.2.0-rc.2 <0.3.0 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5",
-    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.3.0 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5"
+    "@deepseek-ai/dsh-fs": ">=0.2.0-rc.2 <0.3.0 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.3.0 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5 || 0.2.2-rc.1"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-fs": {
