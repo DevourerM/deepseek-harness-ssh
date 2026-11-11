@@ -3,17 +3,24 @@ import {posix} from 'node:path';
 export class RemoteFileSystem {
   constructor(mounts, ErrorType = Error) { this.mounts = mounts; this.ErrorType = ErrorType; }
   error(message, code) { const error = new this.ErrorType(message, code); error.code = code; return error; }
-  async request(target, action, extra = {}, signal) {
-    try { return await this.mounts.request(target.ssh.record, {action, path: target.ssh.path, ...extra}, signal); }
-    catch (error) { if (error.code?.startsWith('FS_')) throw this.error(error.message, error.code); throw error; }
+  mapping(record) { return JSON.stringify([record.alias, record.remoteRoot]); }
+  current(target) {
+    if (target.ssh.mapping !== this.mapping(target.ssh.record)) throw this.error('工作区连接或目录已更新，请重新打开文件', 'FS_STALE_VERSION');
   }
-  target(record, path) { return {targetKey: `ssh:${record.id}:${path}`, displayPath: `ssh://${record.alias}${path}`, ssh: {record, path}}; }
-  async resolve(route, signal) { const result = await this.mounts.request(route.record, {action: 'resolve', path: route.path}, signal); return this.target(route.record, result.path); }
-  processPath(target) { return target.ssh.path; }
-  fileUrl(target) { return 'file://' + target.ssh.path.split('/').map(encodeURIComponent).join('/'); }
-  contains(parent, child) { if (!child.ssh || parent.ssh.record.id !== child.ssh.record.id) return false; const rel = posix.relative(parent.ssh.path, child.ssh.path); return !rel || rel !== '..' && !rel.startsWith('../') && !posix.isAbsolute(rel); }
+  async request(target, action, extra = {}, signal) {
+    this.current(target);
+    try {
+      const result = await this.mounts.request(target.ssh.record, {action, path: target.ssh.path, ...extra}, signal);
+      this.current(target); return result;
+    } catch (error) { if (error.code?.startsWith('FS_')) throw this.error(error.message, error.code); throw error; }
+  }
+  target(record, path) { const mapping = this.mapping(record); return {targetKey: `ssh:${record.id}:${encodeURIComponent(mapping)}:${path}`, displayPath: `ssh://${record.alias}${path}`, ssh: {record, path, mapping}}; }
+  async resolve(route, signal) { const target = this.target(route.record, route.path), result = await this.request(target, 'resolve', {}, signal); return this.target(route.record, result.path); }
+  processPath(target) { this.current(target); return target.ssh.path; }
+  fileUrl(target) { this.current(target); return 'file://' + target.ssh.path.split('/').map(encodeURIComponent).join('/'); }
+  contains(parent, child) { this.current(parent); if (!child.ssh || parent.ssh.record.id !== child.ssh.record.id) return false; this.current(child); const rel = posix.relative(parent.ssh.path, child.ssh.path); return !rel || rel !== '..' && !rel.startsWith('../') && !posix.isAbsolute(rel); }
   stat(target, signal) { return this.request(target, 'stat', {}, signal).then(result => result || undefined); }
-  async lstat(route, signal) { const value = await this.mounts.request(route.record, {action: 'lstat', path: route.path}, signal); return value || undefined; }
+  async lstat(route, signal) { const value = await this.request(this.target(route.record, route.path), 'lstat', {}, signal); return value || undefined; }
   async readBytes(target, signal, maxBytes = 16 * 1024 * 1024) { return Buffer.from((await this.request(target, 'read', {limit: maxBytes}, signal)).data, 'base64'); }
   async readByteRange(target, range, signal) { return Buffer.from((await this.request(target, 'read', {limit: range.length, offset: range.offset, range: true}, signal)).data, 'base64'); }
   async readText(target, signal) {
@@ -24,6 +31,7 @@ export class RemoteFileSystem {
   async streamText(target, signal) { const content = await this.readText(target, signal); return (async function* () { yield content; })(); }
   async listDir(target, signal) { return (await this.request(target, 'list', {}, signal)).map(entry => ({...entry, target: this.target(target.ssh.record, posix.join(target.ssh.path, entry.name))})); }
   policy(target, supplied) {
+    this.current(target);
     const policy = supplied || this.mounts.ctx.sandboxPolicy?.resolve() || {mode: 'read-only'};
     const route = this.mounts.route(policy.workspaceRoot || target.ssh.record.localRoot);
     if (policy.mode === 'read-only') throw this.error('远程工作区为只读模式', 'FS_SANDBOX_DENIED');

@@ -19,6 +19,7 @@ export class Jobs {
         case 'install': return this.install(input.alias, input.secrets, signal);
         case 'open': return this.open(input.alias, input.path, input.secrets, signal, input.title);
         case 'connect': return this.connect(input.alias, input.secrets, signal);
+        case 'update-workspace': return this.updateWorkspace(input, signal);
         default: throw new SshError('未知的后台操作', 'ACTION_INVALID');
       }
     }).then(result => { job.result = result; }, error => { job.error = publicError(error); }).finally(() => { job.done = true; job.updated = Date.now(); });

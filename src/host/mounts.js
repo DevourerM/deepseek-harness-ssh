@@ -4,12 +4,60 @@ import {mkdir, readFile} from 'node:fs/promises';
 import {join, relative, sep, posix, win32} from 'node:path';
 import {SshError, atomicWrite} from './config.js';
 import {SshConnector, browse, exec, quote} from './ssh.js';
+import {WorkspaceConfig} from './workspace-config.js';
 
 export class Mounts {
-  records = []; connections = new Map(); connecting = new Map(); authentication = new Map(); scope = new AsyncLocalStorage(); disposed = false;
+  records = []; connections = new Map(); connecting = new Map(); authentication = new Map(); scope = new AsyncLocalStorage(); disposed = false; tail = Promise.resolve();
   constructor(store, ctx = {}) { this.store = store; this.ctx = ctx; this.ssh = new SshConnector(store); }
-  init() {
-    return this.initRecords();
+  serial(fn) { const result = this.tail.then(() => { if (this.disposed) throw new SshError('SSH 工作区已停止', 'DISPOSED'); return fn(); }); this.tail = result.catch(() => {}); return result; }
+  persist(records = this.records) { return atomicWrite(join(this.store.root, 'mounts.json'), JSON.stringify(records, null, 2) + '\n'); }
+  async init() {
+    await this.initRecords();
+    this.installDirectoryReset();
+  }
+  installDirectoryReset() {
+    const service = this.ctx.workingDirectory;
+    if (this.removeDirectoryReset || !service?.get || !this.ctx.on) return;
+    const descriptor = Object.getOwnPropertyDescriptor(service, 'get'), original = service.get.bind(service);
+    const replacement = session => {
+      const record = this.byPath(session.header.cwd);
+      return record?.cwdResetSessions?.includes(session.id) ? record.localRoot : original(session);
+    };
+    service.get = replacement;
+    const reset = async session => {
+      if (!this.byPath(session.header.cwd)) return;
+      // Model/tool admission runs outside the mutation queue. Wait for queued
+      // edits before inspecting pending resets, then enqueue reset persistence.
+      await this.tail;
+      await this.resetDirectory(session);
+    };
+    const removers = [
+      this.ctx.on('agent/pre-step', async ({agent}, next) => { await reset(agent.session); return next(); }, {prepend: true}),
+      this.ctx.on('system-prompt/assemble', async (_assembly, context, next) => { if (context.agent) await reset(context.agent.session); return next(); }, {prepend: true}),
+      this.ctx.on('tools/pre-execute', async (execution, next) => { await reset(execution.agent.session); return next(); }, {prepend: true})
+    ];
+    this.removeDirectoryReset = () => {
+      for (const remove of removers) if (typeof remove === 'function') remove();
+      if (Object.getOwnPropertyDescriptor(service, 'get')?.value === replacement) {
+        if (descriptor) Object.defineProperty(service, 'get', descriptor); else delete service.get;
+      }
+      this.removeDirectoryReset = undefined;
+    };
+  }
+  resetDirectory(session) {
+    const record = this.byPath(session.header.cwd);
+    if (!record?.cwdResetSessions?.includes(session.id)) return Promise.resolve();
+    return this.serial(async () => {
+      if (!record.cwdResetSessions?.includes(session.id)) return;
+      // The durable pending set also covers histories restored after restart.
+      // Append through Session's public event API before allowing model work.
+      session.append('working-directory/change', {cwd: record.localRoot});
+      const flushed = await this.ctx.sessions?.flush?.(session);
+      if (!flushed) throw new SshError('工作区目录变更正在等待会话持久化，请恢复会话存储后重试', 'WORKSPACE_CWD_PENDING', {sessionId: session.id}, 503);
+      const next = {...record, cwdResetSessions: record.cwdResetSessions.filter(id => id !== session.id)};
+      await this.persist(this.records.map(value => value === record ? next : value));
+      Object.assign(record, next);
+    });
   }
   async initRecords() {
     try { this.records = JSON.parse(await readFile(join(this.store.root, 'mounts.json'), 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -70,30 +118,39 @@ export class Mounts {
   }
   authState() { return [...this.authentication.values()].map(({id, alias, error}) => ({id, alias, error})); }
   cancelAuth(id) { const pending = [...this.authentication.values()].find(x => x.id === id); if (pending) { clearTimeout(pending.timer); this.authentication.delete(pending.alias); pending.reject(new SshError('已取消 SSH 认证', 'CANCELLED')); } return {cancelled: !!pending}; }
-  async open(alias, path, secrets, signal, title) {
-    const connection = await this.connect(alias, secrets, signal), directory = await browse(connection, path, {signal});
+  open(alias, path, secrets, signal, title) { return this.serial(() => this.openSerial(alias, path, secrets, signal, title)); }
+  async openSerial(alias, path, secrets, signal, title) {
+    const directory = await this.browse(alias, path, secrets, signal);
     const customTitle = typeof title === 'string' ? title.trim().slice(0, 120) : '';
     const defaultTitle = `SSH · ${alias} · ${posix.basename(directory.path) || '/'}`;
     let record = this.records.find(r => r.alias === alias && r.remoteRoot === directory.path);
     if (!record) {
-      const id = createHash('sha256').update(JSON.stringify([alias, directory.path])).digest('hex').slice(0, 24);
+      let id = createHash('sha256').update(JSON.stringify([alias, directory.path])).digest('hex').slice(0, 24);
+      // Retargeting preserves the original identity directory. Reopening that
+      // original target must allocate a separate identity and conversation set.
+      while (this.records.some(record => record.id === id || record.localRoot === join(this.store.root, 'workspaces', id))) id = randomUUID();
       const localRoot = join(this.store.root, 'workspaces', id); await mkdir(localRoot, {recursive: true});
       const resolvedTitle = customTitle || defaultTitle;
       record = {id, alias, remoteRoot: directory.path, localRoot: await (await import('node:fs/promises')).realpath(localRoot), ...(customTitle ? {title: customTitle} : {})};
-      const workspace = await this.ctx.workspaceRegistry.create(record.localRoot, resolvedTitle);
-      if (customTitle && workspace.title !== customTitle) await workspace.setTitle(customTitle);
-      record.workspaceId = workspace.id; this.records.push(record);
-      await atomicWrite(join(this.store.root, 'mounts.json'), JSON.stringify(this.records, null, 2) + '\n');
+      const workspace = await this.ctx.workspaceRegistry.create(record.localRoot, resolvedTitle), previousTitle = workspace.title;
+      try {
+        if (customTitle && workspace.title !== customTitle) await workspace.setTitle(customTitle);
+        record.workspaceId = workspace.id;
+        signal?.throwIfAborted();
+        await this.persist([...this.records, record]);
+        this.records.push(record);
+      } catch (error) {
+        if (workspace.title !== previousTitle) await workspace.setTitle(previousTitle);
+        throw error;
+      }
     } else {
-      // The native directory picker re-adopts existing paths. Restore a useful
-      // title instead of exposing the local identity directory's hash.
-      let dirty = false;
-      if (customTitle && record.title !== customTitle) { record.title = customTitle; dirty = true; }
-      const workspace = await this.ctx.workspaceRegistry.create(record.localRoot, customTitle || record.title || defaultTitle);
-      if (customTitle && workspace.title !== customTitle) await workspace.setTitle(customTitle);
-      else if (workspace.title === record.id) await workspace.setTitle(record.title || defaultTitle);
-      if (workspace.id !== record.workspaceId) { record.workspaceId = workspace.id; dirty = true; }
-      if (dirty) await atomicWrite(join(this.store.root, 'mounts.json'), JSON.stringify(this.records, null, 2) + '\n');
+      // Native title edits remain authoritative; only generated identity titles
+      // and explicitly requested titles need repair during re-adoption.
+      const workspace = this.ctx.workspaceRegistry.get?.(record.workspaceId) || await this.ctx.workspaceRegistry.create(record.localRoot, customTitle || record.title || defaultTitle);
+      const title = customTitle || (workspace.title === record.id ? record.title || defaultTitle : workspace.title);
+      const next = {...record, workspaceId: workspace.id, ...(customTitle ? {title: customTitle} : {})};
+      const dirty = next.workspaceId !== record.workspaceId || next.title !== record.title;
+      await new WorkspaceConfig(this).commit(workspace, title, dirty ? record : undefined, dirty ? next : undefined, signal);
     }
     await this.store.remember(alias, directory.path);
     return {...record, state: 'connected'};
@@ -113,5 +170,5 @@ export class Mounts {
     let data; try { data = JSON.parse(result.stdout.trim()); } catch { throw new SshError('远端文件系统返回了无效数据', 'FS_IO_ERROR'); }
     if (!data.ok) { const error = new Error(data.message); error.code = data.code; throw error; } return data.value;
   }
-  dispose() { this.disposed = true; for (const p of this.authentication.values()) { clearTimeout(p.timer); p.reject(new SshError('SSH 工作区已关闭', 'DISPOSED')); } this.authentication.clear(); this.ssh.dispose(); this.connections.clear(); }
+  dispose() { this.disposed = true; this.removeDirectoryReset?.(); for (const p of this.authentication.values()) { clearTimeout(p.timer); p.reject(new SshError('SSH 工作区已关闭', 'DISPOSED')); } this.authentication.clear(); this.ssh.dispose(); this.connections.clear(); }
 }

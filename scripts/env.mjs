@@ -2,11 +2,11 @@ import {existsSync, readFileSync} from 'node:fs';
 import {resolve, join} from 'node:path';
 export const root = resolve(import.meta.dirname, '..');
 export const artifacts = join(root, 'artifacts');
-// Verified host: DSH 0.2.2-rc.1; 0.2.1-rc.5 stays as a compatibility fallback.
-export const supportedRuntime = '0.2.2-rc.1';
+export const supportedRuntime = '0.2.2-rc.2';
 export function runtimePath() {
   const runtime = [
     process.env.DSH_DEV_RUNTIME,
+    resolve(root, `../tree-chat/research/compat-${supportedRuntime}/dsh/node_modules`),
     resolve(root, '../tree-chat/research/compat-0.2.2-rc.1/dsh/node_modules'),
     resolve(root, '../tree-chat/research/compat-0.2.1-rc.5/dsh/node_modules'),
     resolve(root, '../tree-chat/research/compat-0.2.1-rc.3/dsh/node_modules'),

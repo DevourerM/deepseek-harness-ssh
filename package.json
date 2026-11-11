@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-ssh",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Local DeepSeek Harness models with SSH remote folders and file tools",
   "type": "module",
   "license": "MIT",
@@ -37,7 +37,8 @@
       "inject": [
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-ui-workspace",
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-context-menu"
       ]
     }
   },
@@ -54,6 +55,7 @@
     "test": "node --test test/*.test.mjs",
     "test:host": "node scripts/host-smoke.mjs",
     "test:ui": "node scripts/ui-smoke.mjs",
+    "test:workspace-config": "node scripts/workspace-config-smoke.mjs",
     "test:install": "node scripts/ui-install.mjs",
     "pack:plugin": "node scripts/build.mjs && node scripts/pack.mjs",
     "test:remote": "node scripts/local-workspace-smoke.mjs",
@@ -64,8 +66,8 @@
     "test:channel-stress": "node scripts/channel-stress.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-fs": ">=0.2.0-rc.2 <0.3.0 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5 || 0.2.2-rc.1",
-    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.3.0 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5 || 0.2.2-rc.1"
+    "@deepseek-ai/dsh-fs": ">=0.2.0-rc.2 <0.3.0 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.3.0 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-fs": {

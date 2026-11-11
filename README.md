@@ -2,6 +2,8 @@
 
 把远程文件夹加入**本地 DSH** 的工作区列表。本地模型和账号通过 SSH 直接读取、写入、编辑远程文件，在远程目录执行命令；聊天、模型设置与会话保存在本机。
 
+0.5.0 在工作区的 **… → 工作区配置** 中增加配置窗口。SSH 工作区可修改名称、已保存的 SSH 主机和远程目录，保存前检查目标目录并保留工作区标识与原有对话；窗口支持临时认证和目录浏览。切换目标前需结束该工作区的运行任务及终端；并发修改会提示重新加载配置。本地工作区可修改名称，目录保留当前 DSH 的固定关联。
+
 0.4.2 使用本地 Host 架构。远端只需要 **SSH、SFTP、POSIX 环境与 Python 3**，无需配置模型账号、安装 DSH、Node 或 npm。Windows 本机 + Rocky Linux 9 远端已在 DSH **0.2.1-rc.3** 上实机验证；官方 DSH **0.2.1-rc.5** 运行时已验证宿主加载、单元测试与 Host API，兼容范围同时保留 0.2.1-rc.3。其他宿主版本和 macOS 远端尚未实机验证。
 
 0.4.2 修复侧栏展开目录时偶发的 `Channel open failure: open failed`。文件操作、SFTP、终端和命令共用按 SSH 连接管理的通道队列，目录操作优先于后台观察；服务器暂时拒绝打开通道时自动退避重试并降低短请求并发。折叠目录和切换会话会取消待处理的观察请求，相同目录的重复观察不会重复开通道。已启动的命令或可能已经执行的写入不会自动重放，也不会为恢复目录读取而断开现有终端。
@@ -17,7 +19,7 @@
 1. 打开 DSH **插件 → 添加插件**，在“包名或地址”填写安装包绝对路径：
 
    ```text
-   D:\code\dsh-plugin\deepseek-harness-ssh\dist\deepseek-harness-ssh-0.4.2.tgz
+   D:\code\dsh-plugin\deepseek-harness-ssh\dist\deepseek-harness-ssh-0.5.0.tgz
    ```
 
 2. 安装并选择 **立即启用**，按宿主提示重启。
@@ -92,7 +94,7 @@ npm run pack:plugin
 npm run test:install
 ```
 
-宿主测试需要 DSH 0.2.1-rc.5 运行时（兼容 0.2.1-rc.3），通过 `DSH_DEV_RUNTIME` 指定其 `node_modules`；未设置时默认使用 `../tree-chat/research/compat-0.2.1-rc.5/dsh/node_modules`，并回退到 rc.3。集成脚本会把实际读到的宿主版本写入 `artifacts/*-result.json`。UI 测试需要 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。`npm run test:install` 在隔离 `DSH_HOME`（位于系统临时目录，避免 Node 包自引用）中通过真实插件界面安装并立即启用 tgz，校验宿主插件 API 真实可用后再打开 SSH 设置页。`npm run test:remote` 读取本机忽略的 `artifacts/real-server/config` 与独立主机指纹，在服务器专用验证目录运行本地模拟模型及真实 SSH 文件测试，不请求外部模型。
+通过 `DSH_DEV_RUNTIME` 指定宿主测试所用的 `node_modules`。未设置时优先使用 `../tree-chat/research/compat-0.2.2-rc.2/dsh/node_modules`，并回退到已安装的旧版测试运行时。集成脚本会把实际读到的宿主版本写入 `artifacts/*-result.json`。UI 测试需要 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。`npm run test:install` 在隔离 `DSH_HOME`（位于系统临时目录，避免 Node 包自引用）中通过真实插件界面安装并立即启用 tgz，校验宿主插件 API 真实可用后再打开 SSH 设置页。`npm run test:remote` 读取本机忽略的 `artifacts/real-server/config` 与独立主机指纹，在服务器专用验证目录运行本地模拟模型及真实 SSH 文件测试，不请求外部模型。
 
 远程文件页支持 UTF-8 文本编辑（保留 BOM 和 CRLF），超过 5 MiB 的文本分页只读；上传与保存上限 8 MiB，单次媒体读取/下载上限 16 MiB。非 UTF-8 文件不会按 UTF-8 覆写。文件页受当前会话权限及远端工作区路径边界约束。
 
