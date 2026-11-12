@@ -1,3 +1,9 @@
+# 0.5.2 文件页路径回写（2026-11-12）
+
+- Desktop profile 实际加载 `profiles/desktop/node_modules/deepseek-harness-ssh`，不是仓库工作区副本。0.5.1 修复当时只在仓库中，重启仍运行 0.5.0。
+- Host 侧栏适配器现在按请求顺序把 `fs.tree` / `fs.trees` 的返回路径改回文件页请求路径，子项路径也挂在该路径下。
+- 已安装到当前 Desktop profile。插件 Host 模块需要再重启一次 DSH 才会替换已加载的 JavaScript。
+
 # 0.5.1 符号链接目录展开（2026-11-12）
 
 - 文件页用请求路径作为目录缓存键。远程 worker 以前把符号链接目录 `realpath` 成目标路径再返回，结果写到文件页不会读取的键上，展开后一直显示「加载中」。

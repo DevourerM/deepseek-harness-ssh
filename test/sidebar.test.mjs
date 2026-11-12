@@ -24,6 +24,16 @@ test('file compatibility routes authenticate before consuming bodies or contacti
   const req={url:'/sidebar/api/fs.tree',method:'POST',[Symbol.asyncIterator](){assert.fail('must not consume rejected request');}};
   const res=new Response();await adapter.handle(req,res,()=>assert.fail('must not call original'));assert.equal(res.status,403);
 });
+test('symlink directory listings are returned under the path the Files UI requested',async()=>{
+  const record={id:'r',remoteRoot:'/srv/project',localRoot:'identity'};
+  const resolved='/srv/project/real/job';
+  const requested='/srv/project/runs/job';
+  const mounts={scope:{run:(_r,fn)=>fn()},route:(path,cwd)=>({record,path:path||cwd}),request:async()=>({levels:[{path:resolved,entries:[{name:'logs',path:resolved+'/logs',isDir:true,isSymlink:true},{name:'train.log',path:resolved+'/train.log',isDir:false}],truncated:false}]})};
+  const value=await new SidebarAdapter({workingDirectory:{get:()=>'/srv/project'},sandboxPolicy:{resolve:()=>({mode:'read-only'})}},mounts).request({record,session:{id:'s'}},'fs.trees',{paths:[requested]});
+  assert.equal(value.levels[0].path,requested);
+  assert.equal(value.levels[0].entries.find(entry=>entry.name==='logs').path,requested+'/logs');
+  assert.equal(value.levels[0].entries.find(entry=>entry.name==='train.log').path,requested+'/train.log');
+});
 test('file backend derives host, root, cwd and permission from the session rather than client hints',async()=>{
   const record={id:'r',remoteRoot:'/srv/project',localRoot:'identity'};let query;
   const mounts={scope:{run:(_r,fn)=>fn()},byPath:()=>record,route:(path,cwd)=>({record,path:path||cwd}),request:async(_record,q)=>{query=q;return {};}};
