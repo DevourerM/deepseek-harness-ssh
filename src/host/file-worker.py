@@ -21,11 +21,18 @@ def sidebar(q):
         canonical = os.path.join(os.path.realpath(os.path.dirname(value)), os.path.basename(value)) if lexical else os.path.realpath(value)
         if os.path.commonpath([root, canonical]) != root: raise ValueError('FS_SANDBOX_DENIED')
         return canonical
+    def display(value):
+        # The Files UI keys every level and watch by the path it requested.
+        # A symlink directory is readable through its link, so returning the
+        # resolved target would store the listing under a key the tree never asks for.
+        if os.path.isabs(value): return os.path.normpath(value)
+        return os.path.normpath(os.path.join(q['cwd'], os.path.expanduser(value)))
     def excluded(full, name):
         relative = os.path.relpath(full, root)
         return any(fnmatch.fnmatchcase(name, p) or fnmatch.fnmatchcase(relative, p) or fnmatch.fnmatchcase(relative + '/', p) for p in q.get('exclude', []) if isinstance(p, str))
     def listing(value):
         directory = checked(value); rows = []; truncated = False
+        shown = display(value)
         with os.scandir(directory) as entries:
             for entry in entries:
                 if excluded(entry.path, entry.name): continue
@@ -33,15 +40,16 @@ def sidebar(q):
                 is_link = entry.is_symlink(); broken = False
                 try: is_dir = entry.is_dir(); broken = is_link and not os.path.exists(entry.path)
                 except OSError: is_dir = False; broken = True
-                rows.append(dict(name=entry.name, path=entry.path, isDir=is_dir, isSymlink=is_link, hidden=entry.name.startswith('.'), broken=broken))
+                rows.append(dict(name=entry.name, path=os.path.join(shown, entry.name), isDir=is_dir, isSymlink=is_link, hidden=entry.name.startswith('.'), broken=broken))
         rows.sort(key=lambda row: (not row['isDir'], row['name'].lower(), row['name']))
-        return dict(path=directory, entries=rows, truncated=truncated)
+        return dict(path=shown, entries=rows, truncated=truncated)
     if op == 'fs.watch':
         if not isinstance(q.get('paths'),list) or len(q['paths'])>64: raise ValueError('Invalid watch batch')
         versions=[]
         for value in q['paths']:
-            try: versions.append(dict(version=version(checked(value))))
-            except Exception as error: versions.append(dict(version=None,error=str(error)))
+            try:
+                versions.append(dict(path=display(value), version=version(checked(value))))
+            except Exception as error: versions.append(dict(path=value, version=None, error=str(error)))
         return dict(versions=versions)
     if op == 'fs.trees':
         paths = q.get('paths')
