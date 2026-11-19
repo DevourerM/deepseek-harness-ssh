@@ -251,7 +251,7 @@ function apply(ctx) {
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({name: 'shell.overlay', id: `${ID}.workspace-config`, order: 91, inject: () => ({ctx, requests})}, WorkspaceConfiguration));
   ctx.effect(() => { const style = document.createElement('style'); style.dataset.plugin = ID; style.textContent = CSS; document.head.appendChild(style); return () => { style.remove(); }; });
   ctx.slots.inject('settings.section', () => ctx.slots.register({name: 'settings.section', id: ID, order: 35, label: () => 'SSH 远程工作区', inject: () => ({ctx})}, Settings));
-  for (const name of ['sidebar.workspaces.directoryFlow', 'conversation.hero.workspace.directoryFlow']) ctx.slots.inject(name, () => ctx.slots.register({name, priority: -100, inject: () => ({ctx})}, WorkspaceFlow));
+  for (const name of ['sidebar.workspaces.directoryFlow', 'conversation.hero.workspace.directoryFlow', 'workspace.picker.directoryFlow']) ctx.slots.inject(name, () => ctx.slots.register({name, priority: -100, inject: () => ({ctx})}, WorkspaceFlow));
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({name: 'shell.overlay', id: ID, order: 90}, ConnectionAuthentication));
   ctx.inject(['sidebarRight'], scope => scope.effect(() => {
     // Close only this plugin's obsolete 0.2.0 tabs as their sessions are adopted.

@@ -25,7 +25,8 @@ try {
   }
   const prompt = page.getByRole('dialog').filter({hasText: '开始使用'}); if (await prompt.count()) await prompt.getByRole('button', {name: '关闭', exact: true}).click();
   await page.getByText('插件', {exact: true}).first().click();
-  await page.getByRole('button', {name: '添加插件', exact: true}).click();
+  // The DSH plugin header can clip this button. Keyboard activation still follows the UI.
+  await page.getByRole('button', {name: '添加插件', exact: true}).and(page.locator(':enabled')).press('Enter');
   await page.getByRole('textbox', {name: '包名或地址', exact: true}).fill(join(root, 'dist', packageName));
   await page.getByRole('button', {name: '安装', exact: true}).click();
   await page.getByText('deepseek-harness-ssh', {exact: true}).first().waitFor({timeout: 120000});

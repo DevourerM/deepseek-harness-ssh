@@ -75,3 +75,77 @@ test('password workspace reconnection pauses operations, accepts manual retry, a
     const rejection=assert.rejects(cancelled,{code:'CANCELLED'});mounts.cancelAuth(mounts.authState()[0].id);await rejection;
   } finally {mounts.dispose();await server.close();}
 });
+
+test('unscoped POSIX paths (such as /api/file chat images) resolve via matching remoteRoot, specificity, active ties, and connected fallback without breaking local files', async () => {
+  class FakeFsError extends Error { constructor(message, code) { super(message); this.code = code; } }
+  const root = await mkdtemp(join(tmpdir(), 'ssh-unscoped-'));
+  const a = {id: 'a', alias: 'host-a', localRoot: join(root, 'a'), remoteRoot: '/srv/shared'};
+  const b = {id: 'b', alias: 'host-b', localRoot: join(root, 'b'), remoteRoot: '/srv/shared'};
+  const sub = {id: 'sub', alias: 'host-sub', localRoot: join(root, 'sub'), remoteRoot: '/srv/shared/sub'};
+  const mounts = new Mounts({}, {sessions: {list: () => [{header: {cwd: b.localRoot}}]}});
+  mounts.records = [a, b, sub];
+  mounts.connections.set('host-a', {});
+  mounts.connections.set('host-b', {});
+
+  const remoteFiles = new Map([
+    ['host-a:/srv/shared/only-a.png', Buffer.from('png-a')],
+    ['host-b:/srv/shared/转角结构投影后的带边对比.png', Buffer.from('png-b')],
+    ['host-sub:/srv/shared/sub/nested.png', Buffer.from('png-sub')],
+    ['host-b:/tmp/outside.png', Buffer.from('png-tmp')]
+  ]);
+  const calls = [];
+  mounts.request = async (record, q) => {
+    calls.push(`${record.alias}:${q.action}:${q.path}`);
+    if (q.action === 'resolve') return {path: q.path};
+    const buf = remoteFiles.get(`${record.alias}:${q.path}`);
+    if (q.action === 'stat') return buf ? {type: 'file', size: buf.length, version: '1'} : undefined;
+    if (q.action === 'read') { if (!buf) throw Object.assign(new Error('not found'), {code: 'FS_NOT_FOUND'}); return {data: buf.toString('base64')}; }
+    return undefined;
+  };
+  const remote = new RemoteFileSystem(mounts, FakeFsError);
+  const fs = {
+    resolve: (path) => ({targetKey: 'local:' + path, displayPath: path}),
+    stat: async () => undefined,
+    lstat: async () => undefined,
+    readText: async () => 'local',
+    streamText: async () => 'local',
+    readBytes: async () => Buffer.from('local'),
+    readByteRange: async () => Buffer.from('local'),
+    listDir: async () => [],
+    writeText: async () => {},
+    editText: async () => {},
+    watch: async () => async () => {},
+    processPath: (t) => t.displayPath,
+    fileUrl: (t) => 'file://' + t.displayPath,
+    contains: () => false
+  };
+  const undo = installFileSystem({fs}, mounts, remote);
+  try {
+    // 1. Most specific remoteRoot wins (/srv/shared/sub beats /srv/shared) even if host-sub is disconnected.
+    const subTarget = await fs.resolve('/srv/shared/sub/nested.png');
+    assert.equal(subTarget.ssh.record.id, 'sub');
+    assert.equal(fs.processPath(subTarget), '/srv/shared/sub/nested.png');
+
+    // 2. Tied remoteRoot prefers live session mount (host-b) with Chinese filename.
+    const bTarget = await fs.resolve('/srv/shared/转角结构投影后的带边对比.png');
+    assert.equal(bTarget.ssh.record.id, 'b');
+    assert.equal((await fs.readBytes(bTarget)).toString(), 'png-b');
+
+    // 3. Tied remoteRoot falls back to other connected mount if absent on primary.
+    const aTarget = await fs.resolve('/srv/shared/only-a.png');
+    assert.equal(aTarget.ssh.record.id, 'a');
+
+    // 4. Outside remoteRoot (/tmp/outside.png) falls back to active connected SSH mount when absent locally.
+    const tmpTarget = await fs.resolve('/tmp/outside.png');
+    assert.equal(tmpTarget.ssh.record.id, 'b');
+    assert.equal((await fs.readBytes(tmpTarget)).toString(), 'png-tmp');
+
+    // 5. Missing file returns local target (so /api/file serves 404) without connecting disconnected host-sub.
+    const missing = await fs.resolve('/tmp/does-not-exist.png');
+    assert.equal(missing.ssh, undefined);
+    assert.ok(!calls.some(c => c.startsWith('host-sub:') && c.includes('/tmp/')));
+
+    // 6. Scoped FS_SANDBOX_DENIED surfaces as FsError instance (not plain SshError).
+    await assert.rejects(() => Promise.resolve().then(() => mounts.scope.run(a, () => fs.resolve('C:\\outside\\secret.png'))), err => err instanceof FakeFsError && err.code === 'FS_SANDBOX_DENIED');
+  } finally { undo(); mounts.dispose(); }
+});

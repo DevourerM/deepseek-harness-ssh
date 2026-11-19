@@ -1,3 +1,21 @@
+# 0.5.5 DSH 0.2.2-rc.5 兼容适配（2026-11-19）
+
+- `peerDependencies`、锁文件和默认测试运行时增加 DSH `0.2.2-rc.5`，保留此前支持的版本。
+- 68 项单测和真实 `0.2.2-rc.5` 宿主测试通过。隔离界面测试验证了远程工作区菜单、主机及目录切换、工作区标识保留、重载和冲突校验。
+- 隔离宿主通过插件页安装并立即启用标准包，插件 API 和 SSH 设置页可用，浏览器无页面错误。
+
+# 0.5.4 聊天附件路径解析
+
+- 补充原生文件接口的 POSIX 路径解析，处理聊天附件等缺少会话上下文的读取请求。回归测试覆盖远程路径匹配、本地路径优先和已连接主机回退。
+
+# 0.5.3 DSH 0.2.2-rc.3 兼容适配（2026-11-13）
+
+- DSH `0.2.2-rc.3` 的 `@deepseek-ai/dsh-client-ui-workspace` 新增第三处目录流扩展槽 `workspace.picker.directoryFlow`；`src/client/index.js` 已同步注入该槽位（保留原有 `sidebar.workspaces.directoryFlow` 与 `conversation.hero.workspace.directoryFlow`）。
+- `peerDependencies` 与 `scripts/env.mjs` 默认运行时增加 `0.2.2-rc.3`，保留此前已验证版本。
+- 构建与单测：`npm run build`、`npm test`（67 项通过，0 失败）、`npm run pack:plugin` 生成 `dist/deepseek-harness-ssh-0.5.3.tgz`。
+- 隔离安装验证：`npm run test:install`（系统临时目录隔离 `DSH_HOME` + `0.2.2-rc.3` 运行时 + Chrome）通过真实 Plugins UI 安装并立即启用，`hostActive: true`、无 `incompatible/skipping` 警告、SSH 设置页可见、0 页面错误。
+- 已通过 `node scripts/install-desktop.mjs` 将 `0.5.3` 安装至当前 Desktop profile，重启 DSH 后生效。
+
 # 0.5.2 文件页路径回写（2026-11-12）
 
 - Desktop profile 实际加载 `profiles/desktop/node_modules/deepseek-harness-ssh`，不是仓库工作区副本。0.5.1 修复当时只在仓库中，重启仍运行 0.5.0。

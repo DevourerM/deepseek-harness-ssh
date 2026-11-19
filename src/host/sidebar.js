@@ -13,6 +13,7 @@ export class SidebarAdapter {
   session(id){const session=typeof id==='string'&&this.ctx.sessions.get(id);const record=session&&this.mounts.byPath(session.header.cwd);return record?{session,record}:null;}
   async request(scope,method,input,signal){
     const {record,session}=scope;
+    this.mounts.touch?.(record);
     const current=this.ctx.workingDirectory.get(session), cwd=this.mounts.scope.run(record,()=>this.mounts.route('',current))?.path||record.remoteRoot;
     if(method==='session.cwd')return {sessionId:session.id,cwd,root:posix.basename(cwd)||'/',parent:cwd===record.remoteRoot?null:posix.dirname(cwd)};
     const path=input.path===undefined?cwd:input.path;

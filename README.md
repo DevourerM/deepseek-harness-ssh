@@ -98,7 +98,7 @@ npm run pack:plugin
 npm run test:install
 ```
 
-通过 `DSH_DEV_RUNTIME` 指定宿主测试所用的 `node_modules`。未设置时优先使用 `../tree-chat/research/compat-0.2.2-rc.2/dsh/node_modules`，并回退到已安装的旧版测试运行时。集成脚本会把实际读到的宿主版本写入 `artifacts/*-result.json`。UI 测试需要 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。`npm run test:install` 在隔离 `DSH_HOME`（位于系统临时目录，避免 Node 包自引用）中通过真实插件界面安装并立即启用 tgz，校验宿主插件 API 真实可用后再打开 SSH 设置页。`npm run test:remote` 读取本机忽略的 `artifacts/real-server/config` 与独立主机指纹，在服务器专用验证目录运行本地模拟模型及真实 SSH 文件测试，不请求外部模型。
+通过 `DSH_DEV_RUNTIME` 指定宿主测试所用的 `node_modules`。未设置时优先使用 `../tree-chat/research/compat-0.2.2-rc.5/dsh/node_modules`，并回退到已安装的旧版测试运行时。集成脚本会把实际读到的宿主版本写入 `artifacts/*-result.json`。UI 测试需要 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。`npm run test:install` 在隔离 `DSH_HOME`（位于系统临时目录，避免 Node 包自引用）中通过真实插件界面安装并立即启用 tgz，校验宿主插件 API 真实可用后再打开 SSH 设置页。`npm run test:remote` 读取本机忽略的 `artifacts/real-server/config` 与独立主机指纹，在服务器专用验证目录运行本地模拟模型及真实 SSH 文件测试，不请求外部模型。
 
 远程文件页支持 UTF-8 文本编辑（保留 BOM 和 CRLF），超过 5 MiB 的文本分页只读；上传与保存上限 8 MiB，单次媒体读取/下载上限 16 MiB。非 UTF-8 文件不会按 UTF-8 覆写。文件页受当前会话权限及远端工作区路径边界约束。
 
