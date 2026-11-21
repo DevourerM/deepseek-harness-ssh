@@ -39,11 +39,12 @@ try {
   await settings.getByText('确认远端主机身份', {exact: true}).waitFor();
   await page.screenshot({path: join(artifacts, 'ssh-host-trust.png'), fullPage: true});
   await settings.getByRole('button', {name: '指纹一致，信任并继续'}).click();
-  await settings.getByLabel('SSH 登录密码', {exact: true}).fill('wrong-first-attempt');
-  await settings.getByRole('button', {name: '验证并继续', exact: true}).click();
-  await settings.getByText('认证未通过，请重新输入', {exact: true}).waitFor();
-  await settings.getByLabel('SSH 登录密码', {exact: true}).fill('test-password');
-  await settings.getByRole('button', {name: '验证并继续', exact: true}).click();
+  await settings.getByLabel(/登录密码/).fill('wrong-first-attempt');
+  await settings.getByRole('button', {name: '继续', exact: true}).click();
+  await settings.getByRole('alert').filter({hasText:'验证失败'}).waitFor();
+  await settings.getByRole('button', {name: '重试', exact: true}).click();
+  await settings.getByLabel(/登录密码/).fill('test-password');
+  await settings.getByRole('button', {name: '继续', exact: true}).click();
   await settings.getByText('连接检查通过，可创建远程工作区', {exact: true}).waitFor();
   await writeFile(join(artifacts, 'settings-geometry.json'), JSON.stringify(await settings.evaluate(node => [...node.querySelectorAll('details,details p,select')].map(el => ({tag: el.tagName, rect: el.getBoundingClientRect().toJSON(), whiteSpace: getComputedStyle(el).whiteSpace, width: getComputedStyle(el).width, minWidth: getComputedStyle(el).minWidth}))), null, 2));
   await page.screenshot({path: join(artifacts, 'ssh-settings.png'), fullPage: true});

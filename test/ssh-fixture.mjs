@@ -5,10 +5,10 @@ import {join, relative, resolve, sep} from 'node:path';
 import {connect as tcpConnect} from 'node:net';
 
 // Real encrypted SSH/SFTP server on loopback. Virtual POSIX paths map to a temporary directory.
-export async function sshFixture(root, {onExec, onShell, execDisabled = false, sftpDisabled = false, ptyRequired = false, password = 'test-password', hostKey, authorizedKey, keyboardOnly = false, interactivePrompt = 'Password: ', keyboardSteps = null, alsoOfferPassword = false, partialPasswordOtp = null, maxSessions = Infinity, refuseSessions = 0} = {}) {
+export async function sshFixture(root, {onExec, onShell, execDisabled = false, sftpDisabled = false, ptyRequired = false, password = 'test-password', hostKey, authorizedKey, keyboardOnly = false, interactivePrompt = 'Password: ', keyboardSteps = null, alsoOfferPassword = false, partialPasswordOtp = null, maxSessions = Infinity, refuseSessions = 0, terminalBastion = false} = {}) {
   const key = hostKey || generateKeyPairSync('rsa', {modulusLength: 2048}).privateKey.export({format: 'pem', type: 'pkcs1'});
   const connections = new Set(), processes = new Set(), forwards = new Set(), answers = []; let execCount = 0, refusedCount = 0, peakSessions = 0, passwordAttempts = 0;
-  const server = new ssh2.Server({hostKeys: [key]}, client => {
+  const server = new ssh2.Server({hostKeys: [key], ...(terminalBastion ? {ident: 'TERM-SSHD'} : {})}, client => {
     connections.add(client); client.on('error', () => {}); client.once('close', () => connections.delete(client));
     let partialDone = false;
     client.on('authentication', ctx => {
@@ -54,6 +54,7 @@ export async function sshFixture(root, {onExec, onShell, execDisabled = false, s
         const release = () => { if (!released) { released = true; sessions--; } };
         session.once('close', release);
         session.on('exec', (accept, reject, info) => {
+          if (terminalBastion) { client.end(); return; }
           if (execDisabled) { reject(); release(); return; }
           execCount++; const stream = accept(); stream.on('error', () => {});
           stream.once('close', release);
@@ -73,6 +74,7 @@ export async function sshFixture(root, {onExec, onShell, execDisabled = false, s
           if (!ptyRequired || hasPty) onShell(stream);
         });
         session.on('sftp', (accept, reject) => {
+          if (terminalBastion) { client.end(); return; }
           if (sftpDisabled) { reject(); release(); return; }
           const sftp = accept(), handles = new Map(); let next = 1;
           sftp.once('close', release);

@@ -51,7 +51,9 @@
      ServerAliveInterval 15
    ```
 
-首次连接需要核对 SHA256 主机指纹。缺少登录密码或加密私钥口令时会弹出输入框，提交后继续原操作；错误密码可以重输。密码只用于当前连接，不写入配置或浏览器持久存储。断线后自动尝试密钥认证，必要时在本地窗口重新提示密码；也可以取消连接。跳板机使用独立凭据。支持单个密码提示的 keyboard-interactive；多轮验证码/MFA 尚不支持。
+首次连接需要核对 SHA256 主机指纹。选择主机后点击连接，插件优先使用已配置的密钥；服务器需要密码、私钥口令或动态口令时，在同一次连接中按提示输入。凭据不写入配置或浏览器持久存储。连接失败后可手动重试，不自动重放动态口令。
+
+南大 `entry.nju.edu.cn` 一类 `TERM-SSHD` 网关，会在 SSH 密码通过后于终端中提示动态口令。插件在该终端内完成验证，之后通过同一 SSH 通道访问文件和启动进程（远端需有 Python 3），不单独开启 SFTP 或 SSH exec 通道。已有直连和入口别名可在工作区配置中切换，保留工作区和会话关联。
 
 配置位于 `%USERPROFILE%\.dsh\plugins\deepseek-harness-ssh\config`，或 `$DSH_HOME/plugins/deepseek-harness-ssh/config`。配置与主机指纹库独立于 VS Code 和 OpenSSH 配置。可以引用已有私钥；不会转发 SSH Agent。支持上述指令、`IdentityAgent none`、引号、注释、`Key=Value` 与 `Host *` 默认值。出于兼容性仍接受旧的 `NodePath` 字段，当前版本不使用它。拒绝 Include、ProxyCommand 和任意本地命令。
 

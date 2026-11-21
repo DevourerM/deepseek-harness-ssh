@@ -5,12 +5,11 @@ import {readFile} from 'node:fs/promises';
 import {createServer, createConnection, isIP} from 'node:net';
 import {SshError, localPath} from './config.js';
 import {openSession, setClientLimit} from './channels.js';
+import {bootstrapShellTransport} from './shell-transport.js';
+import {isOtpPrompt, isPasswordPrompt} from './auth-prompts.js';
 export {openSession} from './channels.js';
+export {isOtpPrompt, isPasswordPrompt} from './auth-prompts.js';
 
-const OTP_PROMPT = /2nd|second|one[\s-]*time|otp|totp|verification|token|passcode|2fa|mfa|二次密码|第二密码|动态密码|验证码|动态|一次性|安全码|令牌/i;
-const PASSWORD_PROMPT = /password|passphrase|密码|口令/i;
-const isOtpPrompt = text => OTP_PROMPT.test(text || '');
-const isPasswordPrompt = text => PASSWORD_PROMPT.test(text || '') && !isOtpPrompt(text);
 const DNS_FAILURE_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL']);
 
 function encodeDnsTcpQuery(hostname, qtype = 1) {
@@ -196,14 +195,10 @@ async function connectTcp(host, port, timeout, alias, signal, dnsOptions) {
 
 export const fingerprintOf = key => 'SHA256:' + createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
 export const endpointOf = host => `[${host.hostname}]:${host.port}`;
-function authenticationError(host, secret, kind = 'password', failed = false, trace = []) {
-  const is2fa = host.authMode === '2fa' && kind === 'password';
-  const label = kind === 'passphrase' ? '私钥口令' : '登录密码';
-  const message = is2fa
-    ? (failed ? `${host.alias} 两步认证未通过，请重新发起两步登录` : `${host.alias} 需要两步认证（登录密码 + 动态口令）`)
-    : (failed ? `${host.alias} 的${label}验证失败，请重新输入` : `${host.alias} 需要输入${label}`);
-  return new SshError(message, failed ? 'SSH_AUTH_FAILED' : 'SSH_AUTH_REQUIRED',
-    {alias: host.alias, username: host.username, hostname: host.hostname, kind, authMode: host.authMode, ...(trace.length ? {trace} : {})});
+function authenticationError(host, kind = 'password', failed = false) {
+  const label = kind === 'passphrase' ? '私钥口令' : kind === 'otp' ? '动态口令' : '登录密码';
+  return new SshError(failed ? `${host.alias} 的${label}验证失败，请重新输入` : `${host.alias} 需要输入${label}`,
+    failed ? 'SSH_AUTH_FAILED' : 'SSH_AUTH_REQUIRED', {alias: host.alias, username: host.username, hostname: host.hostname, kind});
 }
 export const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
 export function nodeCommand(host, fn, args = []) {
@@ -234,7 +229,7 @@ export class SshConnector {
     try {
       const chain = []; let h = host;
       while (h) { chain.unshift(h); h = h.proxyJump ? await this.store.host(h.proxyJump) : null; }
-      let previous;
+      let previous, remoteIdent = '';
       for (const item of chain) {
         signal?.throwIfAborted();
         const sock = previous
@@ -243,138 +238,121 @@ export class SshConnector {
         if (!previous && sock) sockets.push(sock);
         const client = new ssh2.Client(); client.on('error', () => {}); clients.push(client); this.active.add(client);
         const known = await this.store.known(), endpoint = endpointOf(item), secret = secrets[item.alias] ?? {};
-        let verification, interactiveError;
-        const used = {password: false, otp: false};
-        let probed = false, methodsRecorded = false, keyboardAttempted = false, passwordAttempted = false, partialAuthed = false;
+        let verification, interactiveError, lastCredential = 'password', submitted = false, partialRound = false;
+        let probed = false, keyboardAttempted = false;
         const tried = new Set();
-        const authTrace = [];
-        const pushTrace = entry => { if (entry) { if (authTrace.length >= 10) authTrace.shift(); authTrace.push(entry); } };
+        const used = new Set();
+        const challenge = async (kind, prompts, name = '', instructions = '') =>
+          onChallenge({kind, alias: item.alias, username: item.username, hostname: item.hostname, prompts, name, instructions});
+        const take = kind => {
+          const value = secret[kind];
+          if (!used.has(kind) && typeof value === 'string' && value) { used.add(kind); return value; }
+        };
         const privateKey = item.identityFile ? await readFile(localPath(item.identityFile)) : undefined;
+        let passphrase = secret.passphrase;
+        if (privateKey && item.preferredAuthentications.includes('publickey')) {
+          let parsed = ssh2.utils.parseKey(privateKey, passphrase);
+          if (parsed instanceof Error && /passphrase|decrypt|encrypted|bad password/i.test(parsed.message)) {
+            if (!onChallenge) throw authenticationError(item, 'passphrase', !!passphrase);
+            [passphrase] = await challenge('passphrase', [{prompt: '私钥口令:', echo: false}], '解锁私钥');
+            signal?.throwIfAborted();
+            parsed = ssh2.utils.parseKey(privateKey, passphrase);
+            if (parsed instanceof Error) throw authenticationError(item, 'passphrase', true);
+          }
+        }
         const agent = item.identityAgent === 'none' ? undefined : item.identityAgent === 'default' ? (process.env.SSH_AUTH_SOCK || (process.platform === 'win32' ? '\\\\.\\pipe\\openssh-ssh-agent' : undefined)) : localPath(item.identityAgent);
         await new Promise((resolve, reject) => {
           let ready = false;
           const fail = error => {
             if (ready) return;
-            const failed = !!(secret.password || secret.otp || used.password || used.otp);
-            reject(verification || interactiveError || (error.level === 'client-authentication' ? authenticationError(item, secret, 'password', failed, authTrace) : new SshError(`SSH ${item.alias}：${error.message}`, 'SSH_CONNECT')));
+            reject(signal?.aborted ? signal.reason : verification || interactiveError || (error.level === 'client-authentication' ? authenticationError(item, lastCredential, submitted) : new SshError(`SSH ${item.alias}：${error.message}`, 'SSH_CONNECT')));
           };
           client.on('error', fail);
-          client.once('close', () => { if (!ready) reject(verification || interactiveError || new SshError('SSH 连接在就绪前关闭', 'SSH_CLOSED')); });
+          client.once('close', () => { if (!ready) reject(signal?.aborted ? signal.reason : verification || interactiveError || new SshError('SSH 连接在就绪前关闭', 'SSH_CLOSED')); });
           client.once('ready', () => { ready = true; setClientLimit(client, item.maxSessions); resolve(); });
+          let interactiveRounds = 0;
           client.on('keyboard-interactive', async (name, instructions, _language, prompts, finish) => {
             if (ready || closed) { finish([]); return; }
-            if (!prompts.length) { pushTrace('kbi#0'); finish([]); return; }
-            pushTrace(`kbi#${prompts.length}:${prompts.map(p => String(p.prompt || '').trim() || 'prompt').join(',')}`);
+            if (++interactiveRounds > 8 || prompts.length > 8) {
+              interactiveError = authenticationError(item, lastCredential, submitted); client.destroy(); return;
+            }
+            if (!prompts.length) { finish([]); return; }
             const answers = new Array(prompts.length), missing = [];
             for (let i = 0; i < prompts.length; i++) {
               const p = prompts[i];
-              if (isPasswordPrompt(p.prompt) && typeof secret.password === 'string' && secret.password && !used.password) {
-                used.password = true; answers[i] = secret.password;
-              } else if (isOtpPrompt(p.prompt) && typeof secret.otp === 'string' && secret.otp && !used.otp) {
-                used.otp = true; answers[i] = secret.otp;
-              } else {
-                missing.push(i);
-              }
+              const kind = isOtpPrompt(p.prompt) ? 'otp' : isPasswordPrompt(p.prompt) ? 'password' : null;
+              if (kind && !p.echo) answers[i] = take(kind);
+              if (answers[i] === undefined) missing.push(i);
+              if (kind) lastCredential = kind;
             }
-            if (!missing.length) { finish(answers); return; }
+            if (!missing.length) { submitted = true; finish(answers); return; }
             if (!onChallenge) {
               if (prompts.length === 1 && prompts[0].echo === false && isPasswordPrompt(prompts[0].prompt)) {
-                interactiveError = authenticationError(item, secret, 'password', used.password, authTrace);
+                interactiveError = authenticationError(item, 'password', submitted);
               } else {
-                interactiveError = new SshError('服务器要求额外的交互验证（例如验证码）；请先使用私钥，或向管理员确认认证方式。不会把登录密码填入验证码提示。', 'SSH_INTERACTIVE_UNSUPPORTED', {alias: item.alias, authMode: item.authMode, ...(authTrace.length ? {trace: authTrace} : {})});
+                interactiveError = new SshError('服务器要求额外的交互验证，请在 DSH 界面连接。', 'SSH_INTERACTIVE_UNSUPPORTED', {alias: item.alias});
               }
-              finish([]); return;
+              client.destroy(); return;
             }
             try {
-              const supplied = await onChallenge({
-                kind: 'keyboard-interactive',
-                alias: item.alias, username: item.username, hostname: item.hostname,
-                name: name || '', instructions: instructions || '',
-                prompts: missing.map(i => ({prompt: prompts[i].prompt, echo: !!prompts[i].echo}))
-              });
+              const supplied = await challenge('keyboard-interactive', missing.map(i => ({prompt: prompts[i].prompt, echo: !!prompts[i].echo})), name, instructions);
+              if (closed || signal?.aborted) return;
               if (!Array.isArray(supplied) || supplied.length !== missing.length) throw new SshError('交互认证输入无效', 'SSH_AUTH_FAILED');
               missing.forEach((idx, k) => {
                 const value = String(supplied[k] ?? '');
                 answers[idx] = value;
-                if (isPasswordPrompt(prompts[idx].prompt)) used.password = true;
-                if (isOtpPrompt(prompts[idx].prompt)) used.otp = true;
+                if (isPasswordPrompt(prompts[idx].prompt)) used.add('password');
+                if (isOtpPrompt(prompts[idx].prompt)) used.add('otp');
               });
+              submitted = true;
               finish(answers);
             } catch (error) {
               interactiveError = error instanceof SshError ? error : new SshError(error?.message || '已取消 SSH 认证', error?.code || 'CANCELLED');
-              finish([]);
+              client.destroy();
             }
           });
           const authHandler = (authsLeft, partialSuccess, cb) => {
-            if (!probed && authsLeft === null) { probed = true; pushTrace('probe:none'); return 'none'; }
-            if (!methodsRecorded && Array.isArray(authsLeft)) { methodsRecorded = true; pushTrace(`methods:[${authsLeft.join(',')}]`); }
-            if (partialSuccess) {
-              partialAuthed = true;
-              pushTrace(`partial:[${Array.isArray(authsLeft) ? authsLeft.join(',') : ''}]`);
-              tried.delete('keyboard-interactive');
-              tried.delete('password');
+            if (interactiveError || closed || signal?.aborted) return false;
+            if (!probed && authsLeft === null) { probed = true; return 'none'; }
+            if (partialSuccess && !partialRound) {
+              partialRound = true;
+              tried.delete('keyboard-interactive'); tried.delete('password');
             }
             const allowed = Array.isArray(authsLeft) ? authsLeft : item.preferredAuthentications;
             for (const method of item.preferredAuthentications) {
-              if (!allowed.includes(method) || tried.has(method)) continue;
-              if (method === 'publickey') { if (!privateKey) continue; tried.add('publickey'); pushTrace('try:publickey'); return 'publickey'; }
-              if (method === 'agent') { if (!agent) continue; tried.add('agent'); pushTrace('try:agent'); return 'agent'; }
-              if (method === 'keyboard-interactive') { tried.add('keyboard-interactive'); keyboardAttempted = true; pushTrace('try:keyboard-interactive'); return 'keyboard-interactive'; }
-              if (method === 'password') {
-                if (keyboardAttempted && !partialAuthed) continue;
-                if (item.authMode === '2fa' && !passwordAttempted) {
-                  if (partialAuthed) {
-                    if (typeof secret.otp === 'string' && secret.otp && !used.otp) {
-                      used.otp = true; tried.add('password'); passwordAttempted = true; pushTrace('try:password-otp');
-                      return {type: 'password', username: item.username, password: secret.otp};
-                    }
-                    if (onChallenge) {
-                      tried.add('password'); passwordAttempted = true; pushTrace('try:password-otp-prompt');
-                      (async () => {
-                        const r2 = await onChallenge({kind: 'keyboard-interactive', alias: item.alias, username: item.username, hostname: item.hostname, name: '两步认证（第 2 步）', instructions: '请输入手机动态口令', prompts: [{prompt: '2nd Password (动态口令): ', echo: false}]});
-                        const otp = String(r2?.[0] ?? ''); used.otp = true;
-                        cb({type: 'password', username: item.username, password: otp});
-                      })().catch(error => {
-                        interactiveError = error instanceof SshError ? error : new SshError(error?.message || '已取消 SSH 认证', error?.code || 'CANCELLED');
-                        cb(false);
-                      });
-                      return undefined;
-                    }
-                  } else {
-                    if (typeof secret.password === 'string' && secret.password && typeof secret.otp === 'string' && secret.otp && !used.password && !used.otp) {
-                      used.password = true; used.otp = true; tried.add('password'); passwordAttempted = true; pushTrace('try:password-combined');
-                      return {type: 'password', username: item.username, password: `${secret.password} ${secret.otp}`};
-                    }
-                    if (onChallenge) {
-                      tried.add('password'); passwordAttempted = true; pushTrace('try:password-combined-prompt');
-                      (async () => {
-                        let pwd = typeof secret.password === 'string' && secret.password && !used.password ? (used.password = true, secret.password) : null;
-                        if (pwd === null) {
-                          const r1 = await onChallenge({kind: 'keyboard-interactive', alias: item.alias, username: item.username, hostname: item.hostname, name: '两步认证（第 1 步）', instructions: '请输入登录密码', prompts: [{prompt: 'Password: ', echo: false}]});
-                          pwd = String(r1?.[0] ?? ''); used.password = true;
-                        }
-                        const r2 = await onChallenge({kind: 'keyboard-interactive', alias: item.alias, username: item.username, hostname: item.hostname, name: '两步认证（第 2 步）', instructions: '请输入手机动态口令', prompts: [{prompt: '2nd Password (动态口令): ', echo: false}]});
-                        const otp = String(r2?.[0] ?? ''); used.otp = true;
-                        cb({type: 'password', username: item.username, password: `${pwd} ${otp}`});
-                      })().catch(error => {
-                        interactiveError = error instanceof SshError ? error : new SshError(error?.message || '已取消 SSH 认证', error?.code || 'CANCELLED');
-                        cb(false);
-                      });
-                      return undefined;
-                    }
-                  }
-                }
-                if (typeof secret.password === 'string' && secret.password && !used.password) {
-                  used.password = true; tried.add('password'); passwordAttempted = true; pushTrace('try:password');
-                  return {type: 'password', username: item.username, password: secret.password};
-                }
-              }
+              if (!allowed.includes(method === 'agent' ? 'publickey' : method) || tried.has(method)) continue;
+              if (method === 'publickey' && !privateKey || method === 'agent' && !agent) continue;
+              tried.add(method);
+              if (method === 'keyboard-interactive') keyboardAttempted = true;
+              if (method !== 'password') return method;
+              if (keyboardAttempted && !partialRound) continue;
+              lastCredential = partialRound ? 'otp' : 'password';
+              const request = value => {
+                submitted = true;
+                return {type: 'password', username: item.username, password: value};
+              };
+              const value = take(lastCredential);
+              if (value !== undefined) return request(value);
+              if (!onChallenge || submitted && lastCredential === 'password') continue;
+              const prompt = partialRound ? '2nd Password:' : 'Password:';
+              challenge(lastCredential, [{prompt, echo: false}]).then(answers => {
+                const [answer] = Array.isArray(answers) ? answers : [];
+                if (typeof answer !== 'string' || !answer || answers.length !== 1) throw authenticationError(item, lastCredential, false);
+                if (!closed && !signal?.aborted) cb(request(answer));
+              }).catch(error => {
+                interactiveError = error instanceof SshError ? error : new SshError('已取消 SSH 认证', 'CANCELLED');
+                if (!closed) cb(false);
+              });
+              return undefined;
             }
-            pushTrace('auth:exhausted');
             return false;
           };
           try { client.connect({host: item.hostname, port: item.port, username: item.username, sock,
-            privateKey, passphrase: secret.passphrase, password: secret.password, agent,
+            privateKey, passphrase, agent,
+            debug: message => {
+              const match = /^Remote ident: ['"]([^'"]+)['"]/.exec(message);
+              if (match) remoteIdent = match[1];
+            },
             tryKeyboard: true, agentForward: false, authHandler,
             readyTimeout: onChallenge ? Math.max(item.timeout, 120000) : item.timeout,
             keepaliveInterval: item.keepalive, keepaliveCountMax: 3,
@@ -391,14 +369,24 @@ export class SshConnector {
               }
               return false;
             }}); } catch (error) {
-              if (privateKey && /passphrase|decrypt|encrypted|bad password/i.test(error.message)) reject(authenticationError(item, secret, 'passphrase', !!secret.passphrase, authTrace));
+              if (privateKey && /passphrase|decrypt|encrypted|bad password/i.test(error.message)) reject(authenticationError(item, 'passphrase', !!passphrase));
               else reject(error);
             }
         });
         previous = client;
+        remoteIdent = client._protocol?._remoteIdentRaw?.toString() || remoteIdent;
       }
       signal?.throwIfAborted();
-      return {client: previous, host, close: () => { signal?.removeEventListener('abort', abort); close(); }};
+      const connection = {client: previous, host, remoteIdent, close: () => { signal?.removeEventListener('abort', abort); close(); }};
+      const ptyFirst = /TERM-SSHD/i.test(remoteIdent);
+      if (ptyFirst || host.transport === 'shell') {
+        connection.useShell = true;
+        connection.singleChannel = ptyFirst;
+        await bootstrapShellTransport(previous, {host, secret: secrets[host.alias], onChallenge, signal, ptyFirst, onClose: connection.close});
+      }
+      signal?.throwIfAborted();
+      signal?.removeEventListener('abort', abort);
+      return connection;
     } catch (e) { signal?.removeEventListener('abort', abort); close(); throw e; }
   }
   dispose() { this.disposed = true; for (const client of this.active) client.destroy(); this.active.clear(); this.challenges.clear(); }

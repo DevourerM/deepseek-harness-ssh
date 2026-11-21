@@ -10,6 +10,7 @@ import ssh2 from 'ssh2';
 import {ConfigStore} from '../src/host/config.js';
 import {LocalManager} from '../src/host/local-manager.js';
 import {RemoteProcesses} from '../src/host/processes.js';
+import {RemoteTerminals} from '../src/host/terminals.js';
 import {SshConnector, browse, exec, forward, nodeCommand} from '../src/host/ssh.js';
 import {RemoteManager} from '../src/host/manager.js';
 import {sshFixture, decodeCommand} from './ssh-fixture.mjs';
@@ -100,6 +101,11 @@ test('encrypted identity file authentication uses an ephemeral passphrase', asyn
   await assert.rejects(f.connector.connect('loopback', {loopback: {passphrase: 'wrong'}}));
   const c = await f.connector.connect('loopback', {loopback: {passphrase: 'ephemeral-key-passphrase'}});
   assert.equal((await exec(c, 'fixture')).stdout, 'SSH_FIXTURE_OK'); c.close();
+  const prompts = [];
+  const interactive = await f.connector.connect('loopback', {}, undefined, {onChallenge: info => {
+    prompts.push(info.kind); return ['ephemeral-key-passphrase'];
+  }});
+  assert.deepEqual(prompts, ['passphrase']); interactive.close();
   assert.ok(!(await readConfig(f.store)).includes('ephemeral-key-passphrase'));
 });
 test('failed remote startup cleans resources and redacts launch tokens from errors', async t => {
@@ -304,7 +310,7 @@ test('connectTcp falls back to RFC1035 DNS-over-TCP when system getaddrinfo fail
   assert.ok(dnsQueries >= 1);
   c.close();
 });
-test('partialSuccess keyboard-interactive -> password Step 2 prompts only OTP and failed 2fa carries sanitized trace', async t => {
+test('partialSuccess keyboard-interactive -> password Step 2 prompts only OTP without leaking credentials', async t => {
   const f = await setup(t, {
     keyboardSteps: [{prompts: [{prompt: 'Password: ', echo: false}], expected: ['step1-secret']}],
     partialPasswordOtp: '888999'
@@ -314,8 +320,8 @@ test('partialSuccess keyboard-interactive -> password Step 2 prompts only OTP an
   await f.store.save(cfg.text.replace('ConnectTimeout 2', 'AuthMode 2fa\n  ConnectTimeout 2'), cfg.revision);
   const bad = await f.connector.connect('loopback', {loopback: {password: 'step1-secret', otp: 'wrong-otp'}}).catch(e => e);
   assert.equal(bad.code, 'SSH_AUTH_FAILED');
-  assert.equal(bad.details.authMode, '2fa');
-  assert.ok(Array.isArray(bad.details.trace) && bad.details.trace.some(x => x.includes('partial:[password]')));
+  assert.equal(bad.details.kind, 'otp');
+  assert.equal(bad.details.trace, undefined);
   assert.ok(!JSON.stringify(bad.details).includes('step1-secret'));
   assert.ok(!JSON.stringify(bad.details).includes('wrong-otp'));
   const prompts = [];
@@ -329,6 +335,145 @@ test('partialSuccess keyboard-interactive -> password Step 2 prompts only OTP an
   assert.match(prompts[0], /Password/);
   assert.match(prompts[1], /2nd Password/);
   conn.close();
+});
+test('password-only SSH requests credentials on the live connection', async t => {
+  const fixture = await setup(t);
+  await fixture.trust();
+  const challenges = [];
+  const connection = await fixture.connector.connect('loopback', {}, undefined, {
+    onChallenge: info => { challenges.push(info.kind); return ['test-password']; }
+  });
+  assert.deepEqual(challenges, ['password']);
+  assert.equal(fixture.server.passwordAttempts, 1);
+  connection.close();
+});
+
+function terminalBastion(onRequest) {
+  return {
+    terminalBastion: true, ptyRequired: true, maxSessions: 1,
+    keyboardSteps: [{prompts: [{prompt: 'Password: ', echo: false}], expected: ['test-password']}],
+    onShell(stream) {
+      let state = 'otp', input = '';
+      stream.write('\x1b[33m2nd Pass');
+      stream.write('word:\x1b[0m');
+      stream.on('data', chunk => {
+        input += chunk.toString();
+        let newline;
+        while ((newline = input.indexOf('\n')) >= 0) {
+          const line = input.slice(0, newline).trim(); input = input.slice(newline + 1);
+          if (state === 'otp') {
+            if (line !== '123456') { stream.end(); return; }
+            state = 'marker'; stream.write('\r\nlogin2$ '); continue;
+          }
+          if (state === 'marker') {
+            const marker = line.match(/__DSH_SH_\w+__/);
+            if (marker) { state = 'loader'; stream.write('\r\n' + marker[0] + '\r\n'); }
+            continue;
+          }
+          if (state === 'loader') {
+            assert.match(line, /^python3 -u -c /);
+            state = 'worker'; continue;
+          }
+          if (state === 'worker') {
+            if (line === '__DSH_EOF__') state = 'rpc';
+            else { assert.ok(line.length <= 512); assert.match(line, /^[A-Za-z0-9+/]+=*$/); }
+            continue;
+          }
+          const request = JSON.parse(line);
+          const send = value => stream.write('__DSH_RPC__:' + JSON.stringify(value) + '\r\n');
+          onRequest?.(request, send);
+        }
+      });
+    }
+  };
+}
+
+test('TERM-SSHD completes shell OTP, then shares one channel for files, commands and terminals', async t => {
+  const operations = [];
+  let terminalId;
+  const fixture = await setup(t, terminalBastion((request, send) => {
+    operations.push(request.op);
+    const reply = value => send({id: request.id, ok: true, value});
+    const output = (id, value) => send({id, event: 'stdout', data: Buffer.from(value).toString('base64')});
+    if (request.op === 'ping') reply({python: '3.12'});
+    if (request.op === 'init_file') { assert.ok(request.source.length > 4096); reply(true); }
+    if (request.op === 'browse') reply({path: '/fixture', directories: []});
+    if (request.op === 'file') reply({ok: true, value: 'fixture file'});
+    if (request.op === 'exec_start') {
+      reply({pid: 12});
+      if (request.spec.argv[0] === 'python3') {
+        terminalId = request.id;
+        output(terminalId, '{"type":"ready","pid":12}\n');
+      } else {
+        output(request.id, 'command output');
+        send({id: request.id, event: 'exit', exitCode: 0});
+      }
+    }
+    if (request.op === 'exec_stdin') {
+      reply(true);
+      if (request.data) {
+        const frame = JSON.parse(Buffer.from(request.data, 'base64').toString());
+        output(terminalId, JSON.stringify({type: 'reply', id: frame.id, value: true}) + '\n');
+        if (frame.op === 'terminate') {
+          output(terminalId, '{"type":"exit","exitCode":0}\n');
+          send({id: terminalId, event: 'exit', exitCode: 0});
+        }
+      }
+    }
+    if (request.op === 'exec_kill') reply(true);
+  }));
+  await fixture.trust();
+  const manager = new LocalManager(fixture.store, {});
+  t.after(() => manager.dispose());
+  const prompts = [];
+  const checked = await manager.check('loopback', {}, undefined, {onChallenge: info => {
+    prompts.push(info.prompts[0].prompt.trim());
+    assert.equal(manager.mounts.connections.has('loopback'), false);
+    return [prompts.length === 1 ? 'test-password' : '123456'];
+  }});
+  assert.deepEqual(prompts, ['Password:', '2nd Password:']);
+  assert.equal(checked.transport, 'shell');
+  assert.equal(checked.python, '3.12');
+  assert.deepEqual(operations.slice(0, 3), ['ping', 'init_file', 'browse']);
+  const record = {id: 'fixture', alias: 'loopback', remoteRoot: '/fixture', localRoot: fixture.root};
+  manager.mounts.records.push(record);
+  assert.equal(await manager.mounts.request(record, {action: 'read', path: '/fixture/file'}), 'fixture file');
+  const processes = new RemoteProcesses(manager.mounts);
+  assert.equal((await processes.execute(record, 'printf command', record.localRoot)).stdout, 'command output');
+  const terminals = new RemoteTerminals(manager.mounts);
+  const terminal = await terminals.spawn(record, {cwd: record.localRoot, argv: ['/bin/bash']});
+  await terminal.write('echo test');
+  await terminal.terminate();
+  assert.equal(fixture.server.peakSessions, 1);
+  assert.equal(fixture.server.execCount, 0);
+});
+
+test('TERM-SSHD rejects invalid OTP and never caches an incomplete connection', async t => {
+  const fixture = await setup(t, terminalBastion());
+  await fixture.trust();
+  const manager = new LocalManager(fixture.store, {});
+  t.after(() => manager.dispose());
+  let attempts = 0;
+  await assert.rejects(manager.connect('loopback', {}, undefined, {onChallenge: info => {
+    attempts++;
+    return [info.kind === 'otp' ? '000000' : 'test-password'];
+  }}), error => error.code === 'SSH_AUTH_FAILED' && error.details.kind === 'otp');
+  assert.equal(attempts, 2);
+  assert.equal(manager.mounts.connections.has('loopback'), false);
+});
+test('TERM-SSHD cancellation at the OTP prompt closes the unfinished connection', async t => {
+  const fixture = await setup(t, terminalBastion());
+  await fixture.trust();
+  const manager = new LocalManager(fixture.store, {});
+  t.after(() => manager.dispose());
+  const controller = new AbortController();
+  await assert.rejects(manager.connect('loopback', {}, controller.signal, {onChallenge: info => {
+    if (info.kind !== 'otp') return ['test-password'];
+    controller.abort();
+    return [];
+  }}), {name: 'AbortError'});
+  assert.equal(manager.mounts.connections.has('loopback'), false);
+  assert.equal(manager.ssh.active.size, 0);
 });
 test('SFTP refusal and silent non-PTY bastion automatically fall back to PTY ShellTransport', {timeout: 15000}, async t => {
   const f = await setup(t, {
