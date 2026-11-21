@@ -20,7 +20,23 @@ export class SshError extends Error {
     super(message); this.code = code; this.details = details; this.status = status;
   }
 }
-const directives = new Set(['hostname', 'user', 'port', 'identityfile', 'identityagent', 'proxyjump', 'connecttimeout', 'serveraliveinterval', 'nodepath']);
+const directives = new Set(['hostname', 'user', 'port', 'identityfile', 'identityagent', 'proxyjump', 'connecttimeout', 'serveraliveinterval', 'nodepath', 'preferredauthentications', 'authmode', 'transport', 'maxsessions']);
+const AUTH_METHODS = new Set(['publickey', 'agent', 'keyboard-interactive', 'password']);
+const AUTH_MODES = new Set(['auto', 'publickey', 'password', '2fa']);
+const TRANSPORTS = new Set(['auto', 'exec', 'shell']);
+function defaultPreferredAuth(authMode) {
+  if (authMode === 'publickey') return ['publickey', 'agent'];
+  if (authMode === '2fa') return ['keyboard-interactive', 'password'];
+  if (authMode === 'password') return ['password', 'keyboard-interactive'];
+  return ['publickey', 'agent', 'keyboard-interactive', 'password'];
+}
+function parsePreferredAuth(raw, alias) {
+  const list = raw.split(',').map(item => item.trim().toLowerCase()).filter(Boolean);
+  if (!list.length || list.some(item => !AUTH_METHODS.has(item))) {
+    throw new SshError(`${alias}: PreferredAuthentications 仅支持 publickey,agent,keyboard-interactive,password`, 'CONFIG_INVALID');
+  }
+  return [...new Set(list)];
+}
 function words(line, number) {
   const result = []; let word = '', quote = null, active = false;
   for (let i = 0; i < line.length; i++) {
@@ -69,11 +85,18 @@ export function parseConfig(text) {
       if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n < min || n > max) throw new SshError(`${alias}: ${key} 必须介于 ${min} 与 ${max}`, 'CONFIG_INVALID');
       return n;
     };
+    const authMode = (o.authmode || 'auto').toLowerCase();
+    if (!AUTH_MODES.has(authMode)) throw new SshError(`${alias}: AuthMode 仅支持 auto, publickey, password, 2fa`, 'CONFIG_INVALID');
+    const transport = (o.transport || 'auto').toLowerCase();
+    if (!TRANSPORTS.has(transport)) throw new SshError(`${alias}: Transport 仅支持 auto, exec, shell`, 'CONFIG_INVALID');
+    const preferredAuthentications = o.preferredauthentications ? parsePreferredAuth(o.preferredauthentications, alias) : defaultPreferredAuth(authMode);
+    const maxSessions = integer('maxsessions', 9, 1, 20);
     const host = {alias, hostname, username: o.user || userInfo().username, port: integer('port', 22, 1, 65535),
       identityFile: o.identityfile, identityAgent: o.identityagent ?? (o.identityfile ? 'none' : 'default'),
       proxyJump: o.proxyjump === 'none' ? undefined : o.proxyjump,
       timeout: integer('connecttimeout', 15, 1, 120) * 1000,
-      keepalive: integer('serveraliveinterval', 15, 1, 300) * 1000, nodePath: o.nodepath || 'node'};
+      keepalive: integer('serveraliveinterval', 15, 1, 300) * 1000, nodePath: o.nodepath || 'node',
+      authMode, preferredAuthentications, transport, maxSessions};
     valueCheck(host.username, 'User'); return host;
   });
   const map = new Map(hosts.map(h => [h.alias, h]));
@@ -86,6 +109,52 @@ export function parseConfig(text) {
     }
   }
   return hosts;
+}
+export function updateHostAuthConfig(text, alias, {authMode}) {
+  const mode = String(authMode || '').toLowerCase();
+  if (!AUTH_MODES.has(mode)) throw new SshError('不支持的登录方式', 'CONFIG_INVALID');
+  const lines = text.split(/\r?\n/), eol = text.includes('\r\n') ? '\r\n' : '\n';
+  let start = -1, end = lines.length, aliases = [], indent = '  ';
+  for (let i = 0; i < lines.length; i++) {
+    const tokens = words(lines[i], i + 1);
+    if (!tokens.length) continue;
+    const match = tokens[0].match(/^([^=]+)=(.*)$/);
+    if (match) tokens.splice(0, 1, match[1], ...(match[2] ? [match[2]] : []));
+    if (tokens[1] === '=') tokens.splice(1, 1);
+    const key = tokens[0].toLowerCase();
+    if (key === 'host') {
+      if (start >= 0) { end = i; break; }
+      const list = tokens.slice(1);
+      if (list.includes(alias)) { start = i; aliases = list; }
+    } else if (start >= 0) {
+      const m = lines[i].match(/^(\s+)/);
+      if (m) indent = m[1];
+    }
+  }
+  if (start < 0) throw new SshError('找不到 SSH 主机，请先在设置中保存配置', 'HOST_MISSING');
+  if (aliases.length > 1) throw new SshError(`Host 行包含多个别名（${aliases.join(' ')}），请在设置中单独编辑`, 'CONFIG_INVALID');
+  const filtered = []; let replaced = false;
+  for (let i = start + 1; i < end; i++) {
+    const tokens = words(lines[i], i + 1);
+    if (tokens.length) {
+      const match = tokens[0].match(/^([^=]+)=(.*)$/);
+      const key = (match ? match[1] : tokens[0]).toLowerCase();
+      if (key === 'authmode') {
+        if (!replaced) { filtered.push(`${indent}AuthMode ${mode}`); replaced = true; }
+        continue;
+      }
+      if (key === 'preferredauthentications') continue;
+    }
+    filtered.push(lines[i]);
+  }
+  if (!replaced) {
+    let insertAt = filtered.length;
+    while (insertAt > 0 && !filtered[insertAt - 1].trim()) insertAt--;
+    filtered.splice(insertAt, 0, `${indent}AuthMode ${mode}`);
+  }
+  const updated = [...lines.slice(0, start + 1), ...filtered, ...lines.slice(end)].join(eol);
+  parseConfig(updated);
+  return updated;
 }
 export function localPath(path) {
   return path === '~' ? homedir() : /^~[\\/]/.test(path) ? join(homedir(), path.slice(2)) : resolve(path);
@@ -109,6 +178,12 @@ export class ConfigStore {
     parseConfig(text);
     if (revision !== (await this.get()).revision) throw new SshError('配置已被其他窗口修改，请重新加载', 'CONFIG_CONFLICT', undefined, 409);
     await atomicWrite(this.path, text); return this.get();
+  }); }
+  setHostAuth(alias, authMode, revision) { return this.serial(async () => {
+    const current = await this.get();
+    if (revision && revision !== current.revision) throw new SshError('配置已被其他窗口修改，请重新加载', 'CONFIG_CONFLICT', undefined, 409);
+    const updated = updateHostAuthConfig(current.text, alias, {authMode});
+    await atomicWrite(this.path, updated); return this.get();
   }); }
   async host(alias) { const host = (await this.get()).hosts.find(h => h.alias === alias); if (!host) throw new SshError('找不到 SSH 主机，请先保存配置', 'HOST_MISSING'); return host; }
   async known() { try { return JSON.parse(await readFile(this.knownPath, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; return {}; } }

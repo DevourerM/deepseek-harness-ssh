@@ -1,6 +1,13 @@
 const {createElement: h, useState, useEffect, useRef} = React;
 const ID = 'deepseek-harness-ssh';
 const inject = ['slots', 'uiWorkspace', 'contextMenus'];
+const activeSessionDocks = new Map();
+const AUTH_MODE_OPTIONS = [
+  {value: 'auto', label: '自动协商（公钥优先，按需交互）'},
+  {value: '2fa', label: '两步认证（密码 + 动态口令）'},
+  {value: 'publickey', label: '仅公钥 / SSH Agent'},
+  {value: 'password', label: '密码登录'}
+];
 async function api(input, signal) {
   const send = globalThis.__DSH_TRANSPORT__?.fetch ?? globalThis.fetch.bind(globalThis);
   const response = await send('/api/dsh-ssh', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(input), signal});
@@ -15,30 +22,63 @@ function pause(ms, signal) {
     signal?.addEventListener('abort', abort, {once: true}); if (signal?.aborted) abort();
   });
 }
-async function action(input, signal) {
+async function action(input, signal, onChallenge) {
   const {jobId} = await api(input, signal);
+  let lastChallengeId = null;
   try {
     while (true) {
       const job = await api({action: 'poll', jobId}, signal);
-      if (job.done) { if (job.error) throw Object.assign(new Error(job.error.message), job.error); return job.result; }
-      await pause(500, signal);
+      if (job.done) {
+        onChallenge?.(null);
+        if (job.error) throw Object.assign(new Error(job.error.message), job.error);
+        return job.result;
+      }
+      if (job.challenge) {
+        if (job.challenge.id !== lastChallengeId) {
+          lastChallengeId = job.challenge.id;
+          onChallenge?.({
+            ...job.challenge,
+            reply: answers => api({action: 'challenge-reply', jobId, challengeId: job.challenge.id, answers}, signal)
+          });
+        }
+      } else if (lastChallengeId !== null) {
+        lastChallengeId = null;
+        onChallenge?.(null);
+      }
+      await pause(300, signal);
     }
-  } catch (e) { if (signal?.aborted) api({action: 'cancel', jobId}).catch(() => {}); throw e; }
+  } catch (e) {
+    onChallenge?.(null);
+    if (signal?.aborted) api({action: 'cancel', jobId}).catch(() => {});
+    throw e;
+  }
 }
 function useOperation() {
   const [busy, setBusy] = useState(false), [error, setError] = useState(null), [result, setResult] = useState(null);
+  const [challenge, setChallenge] = useState(null), [challengeBusy, setChallengeBusy] = useState(false);
   const controller = useRef(null), retry = useRef(null), credentials = useRef({}), alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; controller.current?.abort(); }; }, []);
+  const onChallenge = value => { if (alive.current) { setChallenge(value); setChallengeBusy(false); } };
   const run = async (fn, remember = true) => {
     if (controller.current) return;
-    const c = new AbortController(); controller.current = c; if (remember) { retry.current = fn; credentials.current = {}; } setBusy(true); setError(null);
-    try { const value = await fn(c.signal, credentials.current); if (alive.current) setResult(value); return value; }
+    const c = new AbortController(); controller.current = c; if (remember) { retry.current = fn; credentials.current = {}; }
+    setBusy(true); setError(null); setChallenge(null); setChallengeBusy(false);
+    try { const value = await fn(c.signal, credentials.current, onChallenge); if (alive.current) setResult(value); return value; }
     catch (e) { if (alive.current && e.name !== 'AbortError') setError(e); }
-    finally { controller.current = null; if (alive.current) setBusy(false); }
+    finally { controller.current = null; if (alive.current) { setBusy(false); setChallenge(null); setChallengeBusy(false); } }
   };
-  return {busy, error, result, run, cancel: () => controller.current?.abort(), clearCredentials: () => { credentials.current = {}; },
+  return {busy, error, result, challenge, challengeBusy, run,
+    cancel: () => controller.current?.abort(),
+    clearCredentials: () => { credentials.current = {}; },
+    replyChallenge: async answers => {
+      if (!challenge || challengeBusy) return;
+      setChallengeBusy(true);
+      try { await challenge.reply(answers); if (alive.current) setChallenge(null); }
+      catch (e) { if (alive.current) { setChallenge(null); setError(e); } }
+      finally { if (alive.current) setChallengeBusy(false); }
+    },
     authenticate: value => { credentials.current = mergeSecrets(credentials.current, value); return run(retry.current, false); },
-    trust: () => { const fn = retry.current; return run(async (signal, extra) => { await api({action: 'trust', challengeId: error.details.challengeId}, signal); return fn(signal, extra); }, false); }};
+    trust: () => { const fn = retry.current; return run(async (signal, extra, cb) => { await api({action: 'trust', challengeId: error.details.challengeId}, signal); return fn(signal, extra, cb); }, false); }};
 }
 function mergeSecrets(base = {}, extra = {}) { const result = {...base}; for (const [alias, value] of Object.entries(extra)) result[alias] = {...result[alias], ...value}; return result; }
 function Icon({kind, size = 22}) {
@@ -55,7 +95,42 @@ function AuthenticationPrompt({error, busy, submit}) {
     h('p', {className: 'ds-ssh-muted'}, '仅在当前窗口中临时使用，不保存到配置文件。输入后会继续刚才的操作。'),
     h('button', {className: 'ds-ssh-button ds-ssh-primary', type: 'submit', disabled: busy || !value}, '验证并继续'));
 }
+function formatPromptLabel(raw) {
+  const text = String(raw || '').trim();
+  if (/2nd|second|one[\s-]*time|otp|totp|verification|token|passcode|2fa|mfa|验证码|动态|一次性|安全码|令牌/i.test(text)) {
+    return text ? `动态口令（${text.replace(/:$/, '')}）` : '动态口令';
+  }
+  if (/password|passphrase|密码|口令/i.test(text)) {
+    return text ? `登录密码（${text.replace(/:$/, '')}）` : '登录密码';
+  }
+  return text || '验证信息';
+}
+function InteractiveChallengePrompt({challenge, busy, submit, cancel}) {
+  const [values, setValues] = useState(() => challenge.prompts.map(() => ''));
+  const [shown, setShown] = useState(() => challenge.prompts.map(() => false));
+  const ready = values.every(v => v.length > 0);
+  return h('form', {className: 'ds-ssh-trust', 'aria-label': 'SSH 交互认证', onSubmit: e => { e.preventDefault(); if (ready && !busy) { submit(values); setValues(challenge.prompts.map(() => '')); } }},
+    h('strong', null, challenge.name || '请输入两步认证信息'),
+    h('p', null, `${challenge.alias} · ${challenge.username}@${challenge.hostname}`),
+    challenge.instructions && h('p', {className: 'ds-ssh-muted'}, challenge.instructions),
+    challenge.prompts.map((p, idx) => h('div', {key: idx, className: 'ds-ssh-password'},
+      h(Field, {
+        label: formatPromptLabel(p.prompt),
+        type: p.echo || shown[idx] ? 'text' : 'password',
+        autoComplete: 'off',
+        autoFocus: idx === 0,
+        value: values[idx] || '',
+        disabled: busy,
+        onChange: e => setValues(old => old.map((v, i) => i === idx ? e.target.value : v))
+      }),
+      !p.echo && h(Button, {onClick: () => setShown(old => old.map((v, i) => i === idx ? !v : v)), 'aria-pressed': shown[idx], disabled: busy}, shown[idx] ? '隐藏' : '显示'))),
+    h('p', {className: 'ds-ssh-muted'}, '仅在当前活握手中临时验证，不保存到配置文件。'),
+    h('div', {className: 'ds-ssh-row'},
+      h('button', {className: 'ds-ssh-button ds-ssh-primary', type: 'submit', disabled: busy || !ready}, '验证并继续'),
+      cancel && h(Button, {onClick: cancel, disabled: busy}, '取消')));
+}
 function Notice({op, onCredentials}) {
+  if (op.challenge) return h(InteractiveChallengePrompt, {key: op.challenge.id, challenge: op.challenge, busy: op.challengeBusy, submit: op.replyChallenge, cancel: op.cancel});
   if (!op.error) return op.busy ? h('div', {className: 'ds-ssh-notice', role: 'status'}, '正在处理… ', h(Button, {onClick: op.cancel}, '取消操作')) : null;
   const error = op.error;
   if (['SSH_AUTH_REQUIRED', 'SSH_AUTH_FAILED'].includes(error.code)) return h(AuthenticationPrompt, {key: `${error.details.alias}:${error.details.kind}:${error.code}`, error, busy: op.busy, submit: value => { onCredentials?.(value); op.authenticate(value); }});
@@ -70,11 +145,13 @@ function Field({label, ...props}) { return h('label', {className: 'ds-ssh-field'
 function Credentials({hosts, alias, secrets, setSecrets, disabled}) {
   const chain = []; let host = hosts.find(x => x.alias === alias);
   while (host && chain.length < 5) { chain.push(host); host = hosts.find(x => x.alias === host.proxyJump); }
-  return h('details', {className: 'ds-ssh-credentials'}, h('summary', null, '临时认证（密码或加密私钥口令）'),
-    h('p', {className: 'ds-ssh-muted'}, '已配置的私钥 / SSH Agent 会自动尝试。下面的内容仅用于本次连接，不保存到磁盘。'),
+  return h('details', {className: 'ds-ssh-credentials'}, h('summary', null, '临时认证（密码、动态口令或私钥口令）'),
+    h('p', {className: 'ds-ssh-muted'}, '已配置的私钥 / SSH Agent 会自动尝试；两步认证主机也可在连接时按提示分步输入。以下内容仅用于本次连接，不落盘。'),
     chain.map(item => h('div', {key: item.alias, className: 'ds-ssh-row'},
       h(Field, {label: `${item.alias} 密码`, type: 'password', autoComplete: 'off', value: secrets[item.alias]?.password || '', disabled,
         onChange: e => setSecrets(old => ({...old, [item.alias]: {...old[item.alias], password: e.target.value}}))}),
+      item.authMode === '2fa' && h(Field, {label: `${item.alias} 动态口令（可选）`, type: 'password', autoComplete: 'off', value: secrets[item.alias]?.otp || '', disabled,
+        onChange: e => setSecrets(old => ({...old, [item.alias]: {...old[item.alias], otp: e.target.value}}))}),
       item.identityFile && h(Field, {label: `${item.alias} 私钥口令`, type: 'password', autoComplete: 'off', value: secrets[item.alias]?.passphrase || '', disabled,
         onChange: e => setSecrets(old => ({...old, [item.alias]: {...old[item.alias], passphrase: e.target.value}}))}))));
 }
@@ -96,7 +173,7 @@ function Settings({ctx}) {
   return h('section', {className: 'ds-ssh-settings'},
     h('div', {className:'ds-ssh-heading'}, h('span',{className:'ds-ssh-icon-tile'},h(Icon,{kind:'server'})),h('div',null,h('h2', null, 'SSH 远程工作区'),h('span',{className:'ds-ssh-muted'},'本地模型 · 远程文件'))), h('p', {className: 'ds-ssh-muted'}, '把远程文件夹加入本地工作区列表。本地 DSH 使用现有模型和账号，通过 SSH 读取、写入和执行命令。'),
     h('details', {className: 'ds-ssh-card ds-ssh-config-card',open:configOpen,onToggle:e=>setConfigOpen(e.currentTarget.open)}, h('summary',null,h('strong',null,'连接配置'),h('span',{className:'ds-ssh-muted'},config?.hosts.length?`${config.hosts.length} 台远程电脑 · 编辑配置`:'添加你的第一台远程电脑')),
-      h('p', {className: 'ds-ssh-muted'}, '使用独立的 OpenSSH 风格配置，Host 为别名。支持 HostName、User、Port、IdentityFile、IdentityAgent、ProxyJump、ConnectTimeout、ServerAliveInterval。'),
+      h('p', {className: 'ds-ssh-muted'}, '使用独立的 OpenSSH 风格配置，Host 为别名。支持 HostName、User、Port、IdentityFile、IdentityAgent、ProxyJump、AuthMode（auto/2fa/publickey/password）、PreferredAuthentications、Transport、MaxSessions、ConnectTimeout、ServerAliveInterval。'),
       config && h('code', {className: 'ds-ssh-config-path'}, config.path),
       h('textarea', {'aria-label': 'SSH 连接配置', spellCheck: false, className: 'ds-ssh-config', value: text, disabled: !config || op.busy, onChange: e => setText(e.target.value)}),
       h('div', {className: 'ds-ssh-row'},
@@ -107,7 +184,7 @@ function Settings({ctx}) {
       h('label', {className: 'ds-ssh-field'}, 'SSH 主机', h('select', {'aria-label': 'SSH 主机', value: alias, disabled: op.busy, onChange: e => { setAlias(e.target.value); }},
         h('option', {value: ''}, '选择已保存的主机'), config?.hosts.map(host => h('option', {key: host.alias, value: host.alias}, `${host.alias} — ${host.username}@${host.hostname}:${host.port}`)))),
       h(Credentials, {hosts: config?.hosts || [], alias, secrets, setSecrets, disabled: op.busy}),
-      h('div', {className: 'ds-ssh-row'}, h(Button, {primary: true, disabled: !alias || op.busy, onClick: () => op.run((signal, extra) => action({action: 'check', alias, secrets: mergeSecrets(secrets, extra)}, signal))}, '检查连接')),
+      h('div', {className: 'ds-ssh-row'}, h(Button, {primary: true, disabled: !alias || op.busy, onClick: () => op.run((signal, extra, onChallenge) => action({action: 'check', alias, secrets: mergeSecrets(secrets, extra)}, signal, onChallenge))}, '检查连接')),
       h(ConnectionResult, {value: op.result})),
     h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value))}),
     sessions.length > 0 && h('div', {className: 'ds-ssh-card'}, h('h3', null, '远程工作区连接'), sessions.map(session => h('div', {key: session.id, className: 'ds-ssh-session'},
@@ -129,7 +206,7 @@ function WorkspaceFlow(props) {
   const op = useOperation();
   useEffect(() => { if (open) { setMode('choose'); setName(''); setListing(null); op.run(async signal => { const data = await api({action: 'config'}, signal); setConfig(data); setAlias(data.hosts[0]?.alias || ''); setBookmarks(await api({action: 'bookmarks'}, signal)); }); } else { op.cancel(); op.clearCredentials(); setSecrets({}); setName(''); } }, [open]);
   if (!open) return null;
-  const browsePath = target => op.run(async (signal, extra) => { const value = await action({action: 'browse', alias, path: target, secrets: mergeSecrets(secrets, extra)}, signal); setListing(value); setPath(value.path); return value; });
+  const browsePath = target => op.run(async (signal, extra, onChallenge) => { const value = await action({action: 'browse', alias, path: target, secrets: mergeSecrets(secrets, extra)}, signal, onChallenge); setListing(value); setPath(value.path); return value; });
   const close = () => { op.cancel(); onCancel(); };
   const localDefaultName = local.trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'my-project';
   const remoteBaseName = path.trim().replace(/\/+$/, '').split('/').pop() || '/';
@@ -161,13 +238,13 @@ function WorkspaceFlow(props) {
           listing.directories.map(entry => h(Button, {key: entry.name, disabled: op.busy, onClick: () => browsePath((listing.path === '/' ? '' : listing.path) + '/' + entry.name)}, '▸ ' + entry.name + (entry.symlink ? ' ↗' : ''))),
           !listing.directories.length && h('p', {className: 'ds-ssh-empty'}, '此目录中没有子目录，可以直接选择当前目录。'), listing.truncated && h('p', null, '只显示前 2000 个目录，可输入完整路径继续。'))),
         h('p', {className: 'ds-ssh-muted'}, '使用本地模型和聊天，文件直接读写到远程电脑。'),
-        h(Button, {primary: true, disabled: !alias || !path.trim() || op.busy, onClick: () => op.run(async (signal, extra) => { const workspace = await action({action: 'open', alias, path, ...(name.trim() ? {title: name.trim()} : {}), secrets: mergeSecrets(secrets, extra)}, signal); onPicked(workspace.localRoot); })}, '连接并创建远程工作区')),
+        h(Button, {primary: true, disabled: !alias || !path.trim() || op.busy, onClick: () => op.run(async (signal, extra, onChallenge) => { const workspace = await action({action: 'open', alias, path, ...(name.trim() ? {title: name.trim()} : {}), secrets: mergeSecrets(secrets, extra)}, signal, onChallenge); onPicked(workspace.localRoot); })}, '连接并创建远程工作区')),
       h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value))}),
       mode !== 'choose' && h(Button, {disabled: op.busy, onClick: () => { setName(''); setMode('choose'); }}, '返回选择')));
 }
 function AuthenticationRequest({pending}) {
   const op = useOperation();
-  useEffect(() => { op.run((signal, secrets) => action({action: 'connect', alias: pending.alias, secrets}, signal)); }, [pending.id]);
+  useEffect(() => { op.run((signal, secrets, onChallenge) => action({action: 'connect', alias: pending.alias, secrets}, signal, onChallenge)); }, [pending.id]);
   return h('div', {className: 'ds-ssh-backdrop'}, h('div', {className: 'ds-ssh-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': '重新连接 SSH'},
     h('h2', null, '重新连接 SSH · ' + pending.alias), h(Notice, {op}),
     h(Button, {onClick: () => { op.cancel(); api({action: 'auth-cancel', id: pending.id}).catch(() => {}); }}, '取消连接')));
@@ -182,7 +259,8 @@ function ConnectionAuthentication() {
     };
     poll(); return () => { closed = true; controller.abort(); clearTimeout(timer); };
   }, []);
-  return pending ? h(AuthenticationRequest, {key: pending.id, pending}) : null;
+  if (!pending || (activeSessionDocks.get(pending.alias) || 0) > 0) return null;
+  return h(AuthenticationRequest, {key: pending.id, pending});
 }
 function WorkspaceConfiguration({ctx, requests}) {
   const [request, setRequest] = useState(requests.current);
@@ -190,13 +268,25 @@ function WorkspaceConfiguration({ctx, requests}) {
   return request ? h(WorkspaceConfigurationDialog, {key: request.workspaceId, ctx, request, close: () => requests.set(null)}) : null;
 }
 function WorkspaceConfigurationDialog({ctx, request, close}) {
-  const [workspace, setWorkspace] = useState(null), [hosts, setHosts] = useState([]);
+  const [workspace, setWorkspace] = useState(null), [hosts, setHosts] = useState([]), [statusMap, setStatusMap] = useState({});
+  const [configRevision, setConfigRevision] = useState('');
   const [title, setTitle] = useState(''), [alias, setAlias] = useState(''), [path, setPath] = useState('');
-  const [listing, setListing] = useState(null), [secrets, setSecrets] = useState({}), [saved, setSaved] = useState(false);
+  const [listing, setListing] = useState(null), [secrets, setSecrets] = useState({}), [saved, setSaved] = useState(false), [authSaved, setAuthSaved] = useState(false);
   const dialog = useRef(null), op = useOperation();
+  const applyStatus = statusData => {
+    setConfigRevision(statusData?.revision || '');
+    const map = {};
+    for (const item of statusData?.hosts || []) map[item.alias] = item;
+    setStatusMap(map);
+  };
   const load = async signal => {
-    const [value, config] = await Promise.all([api({action: 'workspace-config', workspaceId: request.workspaceId}, signal), api({action: 'config'}, signal)]);
-    setWorkspace(value); setTitle(value.title || ''); setAlias(value.alias || ''); setPath(value.path); setHosts(config.hosts); setListing(null); setSaved(false);
+    const [value, config, statusData] = await Promise.all([
+      api({action: 'workspace-config', workspaceId: request.workspaceId}, signal),
+      api({action: 'config'}, signal),
+      api({action: 'hosts-status'}, signal)
+    ]);
+    setWorkspace(value); setTitle(value.title || ''); setAlias(value.alias || ''); setPath(value.path);
+    setHosts(config.hosts); applyStatus(statusData); setListing(null); setSaved(false); setAuthSaved(false);
   };
   useEffect(() => { op.run(load); }, []);
   useEffect(() => {
@@ -214,9 +304,12 @@ function WorkspaceConfigurationDialog({ctx, request, close}) {
     return () => { document.removeEventListener('keydown', trap, true); previous?.isConnected && previous.focus?.(); };
   }, []);
   const dismiss = () => { op.cancel(); close(); };
-  const browsePath = target => op.run(async (signal, extra) => { const value = await action({action: 'browse', alias, path: target, secrets: mergeSecrets(secrets, extra)}, signal); setPath(value.path); setListing(value); return value; });
+  const browsePath = target => op.run(async (signal, extra, onChallenge) => { const value = await action({action: 'browse', alias, path: target, secrets: mergeSecrets(secrets, extra)}, signal, onChallenge); setPath(value.path); setListing(value); applyStatus(await api({action: 'hosts-status'}, signal)); return value; });
   const remote = workspace?.kind === 'remote';
   const changed = workspace && (title !== workspace.title || alias !== (workspace.alias || '') || path !== workspace.path);
+  const selectedHost = hosts.find(host => host.alias === alias);
+  const selectedStatus = statusMap[alias];
+  const connected = !!selectedStatus?.connected;
   return h('div', {className: 'ds-ssh-backdrop', onKeyDown: event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dismiss(); } }},
     h('div', {className: 'ds-ssh-dialog', ref: dialog, role: 'dialog', 'aria-modal': true, 'aria-label': '工作区配置', tabIndex: -1},
       h('div', {className: 'ds-ssh-row ds-ssh-dialog-header'}, h('div', null, h('span', {className: 'ds-ssh-kicker'}, remote ? 'SSH 远程工作区' : '工作区'), h('h2', null, '工作区配置')), h(Button, {'aria-label': '关闭工作区配置', onClick: dismiss}, '×')),
@@ -224,31 +317,116 @@ function WorkspaceConfigurationDialog({ctx, request, close}) {
       workspace && h('div', {className: 'ds-ssh-stack'},
         h(Field, {label: '工作区名称', value: title, maxLength: 120, disabled: op.busy, onChange: event => { setTitle(event.target.value); setSaved(false); }}),
         remote ? h(React.Fragment, null,
-          h('label', {className: 'ds-ssh-field'}, 'SSH 主机', h('select', {value: alias, disabled: op.busy, onChange: event => { setAlias(event.target.value); setListing(null); setSaved(false); }},
+          h('div', {className: 'ds-ssh-status-bar'},
+            h('span', {className: `ds-ssh-pill${connected ? ' ds-ssh-pill-ok' : ''}`}, connected ? `已连接 · ${alias}` : `未连接 · ${alias || '未选择'}`),
+            alias && selectedHost && (connected
+              ? h(Button, {disabled: op.busy, onClick: () => op.run(async signal => { await api({action: 'disconnect', id: alias}, signal); applyStatus(await api({action: 'hosts-status'}, signal)); })}, '断开连接')
+              : h(Button, {disabled: op.busy, onClick: () => op.run(async (signal, extra, onChallenge) => { await action({action: 'connect', alias, secrets: mergeSecrets(secrets, extra)}, signal, onChallenge); applyStatus(await api({action: 'hosts-status'}, signal)); })}, '立即登录'))),
+          h('label', {className: 'ds-ssh-field'}, 'SSH 主机', h('select', {value: alias, disabled: op.busy, onChange: event => { setAlias(event.target.value); setListing(null); setSaved(false); setAuthSaved(false); }},
             !hosts.some(host => host.alias === alias) && h('option', {value: alias}, `${alias}（请在 SSH 设置中配置）`),
             hosts.map(host => h('option', {key: host.alias, value: host.alias}, `${host.alias} — ${host.username}@${host.hostname}:${host.port}`)))),
+          selectedHost && h('label', {className: 'ds-ssh-field'}, '登录方式', h('select', {value: selectedHost.authMode || 'auto', disabled: op.busy, onChange: event => {
+            const authMode = event.target.value;
+            op.run(async signal => {
+              const updated = await api({action: 'update-host-auth', alias, authMode, revision: configRevision}, signal);
+              setHosts(updated.hosts); applyStatus(await api({action: 'hosts-status'}, signal)); setAuthSaved(true);
+            });
+          }}, AUTH_MODE_OPTIONS.map(opt => h('option', {key: opt.value, value: opt.value}, opt.label)))),
+          authSaved && h('div', {className: 'ds-ssh-notice', role: 'status'}, '登录方式已更新。若当前已连接且需要切换方式，可先断开再重新登录。'),
           h(Credentials, {hosts, alias, secrets, setSecrets, disabled: op.busy}),
           h('div', {className: 'ds-ssh-row'}, h(Field, {label: '远程目录', value: path, disabled: op.busy, placeholder: '~/projects', onChange: event => { setPath(event.target.value); setListing(null); setSaved(false); }}), h(Button, {disabled: !alias || !path.trim() || op.busy, onClick: () => browsePath(path)}, '浏览目录')),
           listing && h('div', {className: 'ds-ssh-directory'}, h('code', null, listing.path), h('div', {className: 'ds-ssh-files', 'aria-label': '远程目录列表'},
             h(Button, {disabled: op.busy, onClick: () => browsePath(listing.path.slice(0, listing.path.lastIndexOf('/')) || '/')}, '↑ 上级目录'),
             listing.directories.map(entry => h(Button, {key: entry.name, disabled: op.busy, onClick: () => browsePath((listing.path === '/' ? '' : listing.path) + '/' + entry.name)}, '▸ ' + entry.name)),
             listing.truncated && h('p', null, '当前显示前 2000 个目录，可输入完整路径继续。'))),
-          h('p', {className: 'ds-ssh-muted'}, '保存时检查远程目录。切换主机或目录前，请先结束此工作区正在运行的任务和终端。主机连接参数可在 设置 → SSH 远程工作区 中修改。')) :
+          h('p', {className: 'ds-ssh-muted'}, '保存时检查远程目录。切换主机或目录前，请先结束此工作区正在运行的任务和终端。')) :
           h(React.Fragment, null, h(Field, {label: '本地目录', value: path, readOnly: true}), h('p', {className: 'ds-ssh-muted'}, '本地工作区支持修改名称。当前 DSH 将本地目录固定关联到已有对话。')),
         h('div', {className: 'ds-ssh-row'},
-          h(Button, {primary: true, disabled: op.busy || !changed || !title.trim() || !path.trim() || (remote && !hosts.some(host => host.alias === alias)), onClick: () => op.run(async (signal, extra) => {
-            const value = await action({action: 'update-workspace', workspaceId: workspace.workspaceId, revision: workspace.revision, title, path, ...(remote ? {alias, secrets: mergeSecrets(secrets, extra)} : {})}, signal);
-            setWorkspace(value); setTitle(value.title || ''); setPath(value.path); setAlias(value.alias || ''); setListing(null); setSecrets({}); setSaved(true); return value;
+          h(Button, {primary: true, disabled: op.busy || !changed || !title.trim() || !path.trim() || (remote && !hosts.some(host => host.alias === alias)), onClick: () => op.run(async (signal, extra, onChallenge) => {
+            const value = await action({action: 'update-workspace', workspaceId: workspace.workspaceId, revision: workspace.revision, title, path, ...(remote ? {alias, secrets: mergeSecrets(secrets, extra)} : {})}, signal, onChallenge);
+            setWorkspace(value); setTitle(value.title || ''); setPath(value.path); setAlias(value.alias || ''); setListing(null); setSecrets({}); setSaved(true);
+            applyStatus(await api({action: 'hosts-status'}, signal));
+            return value;
           })}, '保存配置'),
           h(Button, {disabled: op.busy, onClick: () => op.run(load)}, '重新加载'),
           h(Button, {disabled: op.busy, onClick: dismiss}, '完成'))),
       saved && h('div', {className: 'ds-ssh-notice', role: 'status'}, '工作区配置已保存，已有对话已保留。重新打开文件面板可查看更新后的目录。'),
       h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value))})));
 }
+function ConversationSshDock({sessionId, requests}) {
+  const [status, setStatus] = useState(null), [dismissed, setDismissed] = useState(false);
+  const op = useOperation();
+  const startedAuthRef = useRef(null), aliasRef = useRef('');
+  useEffect(() => {
+    setDismissed(false); startedAuthRef.current = null;
+    if (!sessionId) { setStatus(null); return; }
+    let closed = false, timer;
+    const controller = new AbortController();
+    const poll = async () => {
+      try {
+        const next = await api({action: 'session-ssh-state', sessionId}, controller.signal);
+        if (closed) return;
+        setStatus(next);
+        if (!next?.ssh) return;
+        timer = setTimeout(poll, next.state === 'connected' && !next.auth ? 3500 : 1200);
+      } catch {
+        if (!closed) timer = setTimeout(poll, 3000);
+      }
+    };
+    poll();
+    return () => { closed = true; controller.abort(); clearTimeout(timer); };
+  }, [sessionId]);
+  useEffect(() => {
+    const alias = status?.ssh ? status.alias : '';
+    aliasRef.current = alias;
+    if (!alias) return;
+    activeSessionDocks.set(alias, (activeSessionDocks.get(alias) || 0) + 1);
+    return () => {
+      const count = (activeSessionDocks.get(alias) || 1) - 1;
+      if (count <= 0) activeSessionDocks.delete(alias); else activeSessionDocks.set(alias, count);
+    };
+  }, [status?.ssh, status?.alias]);
+  useEffect(() => {
+    const auth = status?.auth;
+    if (!auth || startedAuthRef.current === auth.id || op.busy) return;
+    startedAuthRef.current = auth.id;
+    setDismissed(false);
+    op.run((signal, secrets, onChallenge) => action({action: 'connect', alias: auth.alias, secrets}, signal, onChallenge));
+  }, [status?.auth?.id]);
+  if (!status?.ssh) return null;
+  const auth = status.auth;
+  const showInteractive = !!auth || op.busy || !!op.error || !!op.challenge;
+  if (!showInteractive && (status.state === 'connected' || dismissed)) return null;
+  const openWorkspaceConfig = () => requests.set({workspaceId: status.workspaceId});
+  const startConnect = () => {
+    setDismissed(false);
+    op.run(async (signal, secrets, onChallenge) => {
+      await action({action: 'connect', alias: status.alias, secrets}, signal, onChallenge);
+      setStatus(await api({action: 'session-ssh-state', sessionId}, signal));
+    });
+  };
+  const cancelConnect = () => {
+    op.cancel();
+    if (auth) api({action: 'auth-cancel', id: auth.id}).catch(() => {});
+    else setDismissed(true);
+  };
+  return h('div', {className: `ds-ssh-dock${showInteractive ? '' : ' ds-ssh-dock-idle'}`, role: 'region', 'aria-label': 'SSH 连接提示'},
+    h('div', {className: 'ds-ssh-dock-bar'},
+      h('span', {className: 'ds-ssh-pill'}, auth ? `需要 SSH 登录 · ${status.alias}` : op.busy ? `正在连接 · ${status.alias}` : `SSH 未连接 · ${status.alias}`),
+      h('span', {className: 'ds-ssh-muted ds-ssh-dock-path'}, status.remoteRoot),
+      h('div', {className: 'ds-ssh-dock-actions'},
+        !showInteractive && h(Button, {primary: true, onClick: startConnect}, '立即登录'),
+        h(Button, {disabled: op.busy && !op.challenge, onClick: openWorkspaceConfig}, '工作区配置'),
+        showInteractive
+          ? h(Button, {onClick: cancelConnect}, '取消')
+          : h(Button, {'aria-label': '收起 SSH 提示', onClick: () => setDismissed(true)}, '×'))),
+    showInteractive && h(Notice, {op}));
+}
 function apply(ctx) {
   const requests = {current: null, listeners: new Set(), set(value) { this.current = value; for (const listener of this.listeners) listener(value); }};
   ctx.effect(() => ctx.contextMenus.register({id: `${ID}.workspace-config`, target: 'workspace', order: 150, resolve: value => [{id: 'configure', label: '工作区配置', icon: {key: 'workspace.rename'}, run: () => requests.set(value)}]}));
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({name: 'shell.overlay', id: `${ID}.workspace-config`, order: 91, inject: () => ({ctx, requests})}, WorkspaceConfiguration));
+  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({name: 'conversation.input.dock', id: ID, order: 15, inject: sessionId => ({sessionId, requests})}, ConversationSshDock));
   ctx.effect(() => { const style = document.createElement('style'); style.dataset.plugin = ID; style.textContent = CSS; document.head.appendChild(style); return () => { style.remove(); }; });
   ctx.slots.inject('settings.section', () => ctx.slots.register({name: 'settings.section', id: ID, order: 35, label: () => 'SSH 远程工作区', inject: () => ({ctx})}, Settings));
   for (const name of ['sidebar.workspaces.directoryFlow', 'conversation.hero.workspace.directoryFlow', 'workspace.picker.directoryFlow']) ctx.slots.inject(name, () => ctx.slots.register({name, priority: -100, inject: () => ({ctx})}, WorkspaceFlow));

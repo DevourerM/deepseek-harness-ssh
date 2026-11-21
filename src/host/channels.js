@@ -8,8 +8,10 @@ const busy = cause => { const error = new SshError('SSH 通道暂时繁忙，请
 // status. Servers may still count a session after its command has exited.
 export class SessionChannels {
   queue = []; leases = new Set(); active = 0; opened = 0; short = 0; persistent = 0; limit = 9; shortLimit = 3; lastRefusal = 0; burst = 0; closed = false;
-  constructor(client) {
+  constructor(client, {maxSessions = 9} = {}) {
     this.client = client;
+    this.limit = Math.max(1, Math.min(20, Number(maxSessions) || 9));
+    this.shortLimit = Math.min(3, this.limit);
     client.once('close', () => {
       this.closed = true; clearTimeout(this.wake);
       for (const item of [...this.queue, ...this.leases]) this.reject(item, new SshError('SSH 连接已关闭', 'SSH_CLOSED'));
@@ -37,14 +39,14 @@ export class SessionChannels {
     if (item.after > Date.now()) return false;
     if (item.kind === 'control') return this.active < Math.min(10, this.limit + 1);
     if (this.active >= this.limit) return false;
-    if (item.kind === 'persistent') return this.persistent < 8 && this.active < Math.max(1, this.limit - 1);
+    if (item.kind === 'persistent') return this.persistent < Math.max(1, this.limit - 1) && (this.limit === 1 ? this.active === 0 : this.active < Math.max(1, this.limit - 1));
     return this.short < this.shortLimit;
   }
   pump() {
     if (this.closed || this.pumping) return;
     this.pumping = true;
     clearTimeout(this.wake);
-    if (this.shortLimit < 3 && Date.now() - this.lastRefusal > 5000) { this.shortLimit++; this.lastRefusal = Date.now(); }
+    if (this.shortLimit < Math.min(3, this.limit) && Date.now() - this.lastRefusal > 5000) { this.shortLimit++; this.lastRefusal = Date.now(); }
     while (true) {
       const ready = this.queue.filter(item => !item.settled && this.eligible(item));
       const item = ready.find(item => item.kind === 'control')
@@ -93,6 +95,12 @@ export class SessionChannels {
   }
 }
 
+export function setClientLimit(client, maxSessions) {
+  let pool = pools.get(client);
+  if (!pool) { pool = new SessionChannels(client, {maxSessions}); pools.set(client, pool); return; }
+  pool.limit = Math.max(1, Math.min(20, Number(maxSessions) || 9));
+  pool.shortLimit = Math.min(3, pool.limit);
+}
 export function openSession(client, method, args = [], options) {
   let pool = pools.get(client);
   if (!pool) { pool = new SessionChannels(client); pools.set(client, pool); }

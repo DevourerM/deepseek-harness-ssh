@@ -250,9 +250,10 @@ def main(q):
         if action == 'write': outcome['operation'] = 'update' if info else 'create'
         return outcome
 
-try:
-    query = json.load(sys.stdin)
-    print(json.dumps(dict(ok=True, value=main(query)), ensure_ascii=True))
-except Exception as error:
-    code = str(error) if str(error).startswith('FS_') else 'FS_NOT_FOUND' if isinstance(error, (FileNotFoundError, NotADirectoryError)) else 'FS_PERMISSION_DENIED' if isinstance(error, PermissionError) else 'FS_IO_ERROR'
-    print(json.dumps(dict(ok=False, code=code, message=str(error))))
+if __name__ == '__main__':
+    try:
+        query = json.load(sys.stdin)
+        print(json.dumps(dict(ok=True, value=main(query)), ensure_ascii=True))
+    except Exception as error:
+        code = str(error) if str(error).startswith('FS_') else 'FS_NOT_FOUND' if isinstance(error, (FileNotFoundError, NotADirectoryError)) else 'FS_PERMISSION_DENIED' if isinstance(error, PermissionError) else 'FS_IO_ERROR'
+        print(json.dumps(dict(ok=False, code=code, message=str(error))))

@@ -5,17 +5,33 @@ import {join, relative, resolve, sep} from 'node:path';
 import {connect as tcpConnect} from 'node:net';
 
 // Real encrypted SSH/SFTP server on loopback. Virtual POSIX paths map to a temporary directory.
-export async function sshFixture(root, {onExec, password = 'test-password', hostKey, authorizedKey, keyboardOnly = false, interactivePrompt = 'Password: ', maxSessions = Infinity, refuseSessions = 0} = {}) {
+export async function sshFixture(root, {onExec, onShell, execDisabled = false, password = 'test-password', hostKey, authorizedKey, keyboardOnly = false, interactivePrompt = 'Password: ', keyboardSteps = null, alsoOfferPassword = false, maxSessions = Infinity, refuseSessions = 0} = {}) {
   const key = hostKey || generateKeyPairSync('rsa', {modulusLength: 2048}).privateKey.export({format: 'pem', type: 'pkcs1'});
-  const connections = new Set(), processes = new Set(), forwards = new Set(), answers = []; let execCount = 0, refusedCount = 0, peakSessions = 0;
+  const connections = new Set(), processes = new Set(), forwards = new Set(), answers = []; let execCount = 0, refusedCount = 0, peakSessions = 0, passwordAttempts = 0;
   const server = new ssh2.Server({hostKeys: [key]}, client => {
     connections.add(client); client.on('error', () => {}); client.once('close', () => connections.delete(client));
     client.on('authentication', ctx => {
+      if (keyboardSteps) {
+        const methods = alsoOfferPassword ? ['password', 'keyboard-interactive', 'publickey'] : ['keyboard-interactive'];
+        if (ctx.method === 'password') { passwordAttempts++; return ctx.password === password ? ctx.accept() : ctx.reject(methods); }
+        if (ctx.method !== 'keyboard-interactive') return ctx.reject(methods);
+        const runStep = index => {
+          const step = keyboardSteps[index];
+          ctx.prompt(step.prompts, response => {
+            answers.push(response);
+            const ok = step.expected.every((exp, i) => response[i] === exp);
+            if (!ok) return ctx.reject(methods);
+            if (index + 1 < keyboardSteps.length) return runStep(index + 1);
+            ctx.accept();
+          });
+        };
+        return runStep(0);
+      }
       if (keyboardOnly) {
         if (ctx.method !== 'keyboard-interactive') return ctx.reject(['keyboard-interactive']);
         return ctx.prompt([{prompt: interactivePrompt, echo: false}], response => { answers.push(response); if (response[0] === password) ctx.accept(); else ctx.reject(['keyboard-interactive']); });
       }
-      if (ctx.username === 'tester' && ctx.method === 'password' && ctx.password === password) return ctx.accept();
+      if (ctx.username === 'tester' && ctx.method === 'password') { passwordAttempts++; if (ctx.password === password) return ctx.accept(); }
       if (ctx.username === 'tester' && ctx.method === 'publickey' && authorizedKey && ctx.key.data.equals(authorizedKey)) {
         const parsed = ssh2.utils.parseKey(ctx.key.data);
         if (!ctx.signature || parsed.verify(ctx.blob, ctx.signature, ctx.hashAlgo) === true) return ctx.accept();
@@ -32,6 +48,7 @@ export async function sshFixture(root, {onExec, password = 'test-password', host
         const release = () => { if (!released) { released = true; sessions--; } };
         session.once('close', release);
         session.on('exec', (accept, reject, info) => {
+          if (execDisabled) { reject(); release(); return; }
           execCount++; const stream = accept(); stream.on('error', () => {});
           stream.once('close', release);
           // Like sshd after process exit, finish the session rather than keep
@@ -40,6 +57,13 @@ export async function sshFixture(root, {onExec, password = 'test-password', host
           if (onExec) onExec(info.command, stream, processes);
           else { stream.write('SSH_FIXTURE_OK'); stream.exit(0); stream.end(); }
           stream.resume();
+        });
+        session.on('pty', accept => accept?.());
+        session.on('shell', (accept, reject) => {
+          if (!onShell) { reject(); release(); return; }
+          const stream = accept(); stream.on('error', () => {});
+          stream.once('close', release);
+          onShell(stream);
         });
         session.on('sftp', accept => {
           const sftp = accept(), handles = new Map(); let next = 1;
@@ -76,7 +100,7 @@ export async function sshFixture(root, {onExec, password = 'test-password', host
     });
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  return {port: server.address().port, key, connections, processes, answers, get execCount() { return execCount; }, get refusedCount() { return refusedCount; }, get peakSessions() { return peakSessions; },
+  return {port: server.address().port, key, connections, processes, answers, get execCount() { return execCount; }, get refusedCount() { return refusedCount; }, get peakSessions() { return peakSessions; }, get passwordAttempts() { return passwordAttempts; },
     drop: () => { for (const c of connections) c.end(); },
     close: async () => { for (const p of processes) p.kill(); for (const socket of forwards) socket.destroy(); for (const c of connections) c.end(); await new Promise(resolve => server.close(resolve)); }};
 }

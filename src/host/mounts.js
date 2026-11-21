@@ -4,6 +4,7 @@ import {mkdir, readFile} from 'node:fs/promises';
 import {join, relative, sep, posix, win32} from 'node:path';
 import {SshError, atomicWrite} from './config.js';
 import {SshConnector, browse, exec, quote} from './ssh.js';
+import {getShellTransport, isExecFallbackError} from './shell-transport.js';
 import {WorkspaceConfig} from './workspace-config.js';
 
 export class Mounts {
@@ -122,9 +123,9 @@ export class Mounts {
     const connectedFallback = this.records.filter(record => !matchedSet.has(record) && this.connections.has(record.alias)).sort(compare);
     return {path: normalized, specific, rootMounts, connectedFallback};
   }
-  async connect(alias, secrets = {}, signal) {
+  async connect(alias, secrets = {}, signal, options = {}) {
     const previous = this.connections.get(alias); if (previous) return previous;
-    const connection = await this.ssh.connect(alias, secrets, signal);
+    const connection = await this.ssh.connect(alias, secrets, signal, options);
     // The lifetime of a successful workspace connection is independent of the
     // settings request that created it; callers cancel individual operations.
     connection.client.once('close', () => { if (this.connections.get(alias) === connection) this.connections.delete(alias); });
@@ -138,7 +139,7 @@ export class Mounts {
     let attempt = this.connecting.get(alias);
     if (!attempt) {
       attempt = this.connect(alias).catch(error => {
-        if (!['SSH_AUTH_REQUIRED', 'SSH_AUTH_FAILED', 'HOST_KEY_UNKNOWN'].includes(error.code)) throw error;
+        if (!['SSH_AUTH_REQUIRED', 'SSH_AUTH_FAILED', 'SSH_INTERACTIVE_UNSUPPORTED', 'HOST_KEY_UNKNOWN'].includes(error.code)) throw error;
         let pending = this.authentication.get(alias);
         if (!pending) {
           const deferred = Promise.withResolvers();
@@ -154,10 +155,24 @@ export class Mounts {
     return new Promise((resolve, reject) => { const abort = () => reject(signal.reason); signal.addEventListener('abort', abort, {once: true}); attempt.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort)); if (signal.aborted) abort(); });
   }
   authState() { return [...this.authentication.values()].map(({id, alias, error}) => ({id, alias, error})); }
+  sessionStatus(sessionId) {
+    const session = typeof sessionId === 'string' && this.ctx.sessions?.get?.(sessionId);
+    const record = session && this.byPath(session.header?.cwd);
+    if (!record) return {ssh: false};
+    const pending = this.authentication.get(record.alias);
+    return {
+      ssh: true,
+      workspaceId: record.workspaceId,
+      alias: record.alias,
+      remoteRoot: record.remoteRoot,
+      state: this.connections.has(record.alias) ? 'connected' : this.connecting.has(record.alias) ? 'connecting' : 'disconnected',
+      ...(pending ? {auth: {id: pending.id, alias: pending.alias, error: pending.error}} : {})
+    };
+  }
   cancelAuth(id) { const pending = [...this.authentication.values()].find(x => x.id === id); if (pending) { clearTimeout(pending.timer); this.authentication.delete(pending.alias); pending.reject(new SshError('已取消 SSH 认证', 'CANCELLED')); } return {cancelled: !!pending}; }
-  open(alias, path, secrets, signal, title) { return this.serial(() => this.openSerial(alias, path, secrets, signal, title)); }
-  async openSerial(alias, path, secrets, signal, title) {
-    const directory = await this.browse(alias, path, secrets, signal);
+  open(alias, path, secrets, signal, title, options) { return this.serial(() => this.openSerial(alias, path, secrets, signal, title, options)); }
+  async openSerial(alias, path, secrets, signal, title, options) {
+    const directory = await this.browse(alias, path, secrets, signal, options);
     const customTitle = typeof title === 'string' ? title.trim().slice(0, 120) : '';
     const defaultTitle = `SSH · ${alias} · ${posix.basename(directory.path) || '/'}`;
     let record = this.records.find(r => r.alias === alias && r.remoteRoot === directory.path);
@@ -195,16 +210,53 @@ export class Mounts {
   }
   list() { return this.records.map(r => ({...r, state: this.connections.has(r.alias) ? 'connected' : 'disconnected'})); }
   disconnect(alias) { this.connections.get(alias)?.close(); this.connections.delete(alias); return {disconnected: true}; }
-  async check(alias, secrets, signal) {
-    const started = Date.now(), c = await this.connect(alias, secrets, signal), directory = await browse(c, '.', {signal});
-    const probe = await exec(c, "python3 -c 'import sys,os,fcntl; print(sys.version.split()[0])'", {signal});
-    return {ssh: true, sftp: true, python: probe.stdout.trim(), ready: true, home: directory.path, latencyMs: Date.now() - started, mode: 'local-host'};
+  async check(alias, secrets, signal, options) {
+    const started = Date.now(), c = await this.connect(alias, secrets, signal, options);
+    const directory = await this.browseConnected(c, '.', signal);
+    let python = '', transport = 'exec';
+    if (c.host?.transport === 'shell' || c.useShell) {
+      python = (await getShellTransport(c.client).ping(signal)).python;
+      c.useShell = true; transport = 'shell';
+    } else {
+      try {
+        const probe = await exec(c, "python3 -c 'import sys,os,fcntl; print(sys.version.split()[0])'", {signal});
+        python = probe.stdout.trim();
+        c.execConfirmed = true;
+      } catch (error) {
+        if (c.host?.transport !== 'auto' || !isExecFallbackError(error)) throw error;
+        python = (await getShellTransport(c.client).ping(signal)).python;
+        c.useShell = true; transport = 'shell';
+      }
+    }
+    return {ssh: true, sftp: true, python, ready: true, home: directory.path, latencyMs: Date.now() - started, mode: 'local-host', transport};
   }
-  async browse(alias, path, secrets, signal) { return browse(await this.connect(alias, secrets, signal), path, {signal}); }
+  async browseConnected(c, path, signal) {
+    if (c.host?.transport === 'shell' || c.useShell) return getShellTransport(c.client).browse(path, signal);
+    try { return await browse(c, path, {signal}); }
+    catch (error) {
+      if (c.host?.transport !== 'auto' || c.execConfirmed || !isExecFallbackError(error)) throw error;
+      const result = await getShellTransport(c.client).browse(path, signal);
+      c.useShell = true;
+      return result;
+    }
+  }
+  async browse(alias, path, secrets, signal, options) { return this.browseConnected(await this.connect(alias, secrets, signal, options), path, signal); }
   async request(record, query, signal) {
-    const c = await this.ensure(record.alias, signal), source = await readFile(new URL('./file-worker.py', import.meta.url), 'utf8');
+    const c = await this.ensure(record.alias, signal);
+    if (c.host?.transport === 'shell' || c.useShell) {
+      return getShellTransport(c.client).fileRequest(query, signal);
+    }
+    const source = await readFile(new URL('./file-worker.py', import.meta.url), 'utf8');
     const code = `import base64;exec(base64.b64decode('${Buffer.from(source).toString('base64')}'))`;
-    const result = await exec(c, `python3 -c ${quote(code)}`, {stdin: JSON.stringify(query), signal, timeout: 60000, maxBytes: 24 * 1024 * 1024, background: query.action === 'sidebar' && query.op === 'fs.watch'});
+    let result;
+    try {
+      result = await exec(c, `python3 -c ${quote(code)}`, {stdin: JSON.stringify(query), signal, timeout: 60000, maxBytes: 24 * 1024 * 1024, background: query.action === 'sidebar' && query.op === 'fs.watch'});
+      c.execConfirmed = true;
+    } catch (error) {
+      if (c.host?.transport !== 'auto' || c.execConfirmed || !isExecFallbackError(error)) throw error;
+      c.useShell = true;
+      return getShellTransport(c.client).fileRequest(query, signal);
+    }
     let data; try { data = JSON.parse(result.stdout.trim()); } catch { throw new SshError('远端文件系统返回了无效数据', 'FS_IO_ERROR'); }
     if (!data.ok) { const error = new Error(data.message); error.code = data.code; throw error; } return data.value;
   }

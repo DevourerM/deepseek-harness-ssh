@@ -27,3 +27,24 @@ test('atomic config saves, optimistic conflict protection and independent host k
   await store.forget('[example]:22'); assert.deepEqual(await store.known(), {});
   assert.equal(await readFile(store.path, 'utf8'), saved.text);
 });
+test('authMode, preferredAuthentications, transport, maxSessions and setHostAuth', async t => {
+  const hosts = parseConfig(`Host entry\n HostName entry.nju.edu.cn\n User js_geqj/10.1.0.102/self\n AuthMode 2fa\n Transport auto\n MaxSessions 3\nHost custom\n HostName 10.0.0.2\n PreferredAuthentications keyboard-interactive,password`);
+  assert.equal(hosts[0].authMode, '2fa');
+  assert.deepEqual(hosts[0].preferredAuthentications, ['keyboard-interactive', 'password']);
+  assert.equal(hosts[0].transport, 'auto');
+  assert.equal(hosts[0].maxSessions, 3);
+  assert.deepEqual(hosts[1].preferredAuthentications, ['keyboard-interactive', 'password']);
+  for (const bad of ['Host x\n AuthMode magic', 'Host x\n PreferredAuthentications invalid', 'Host x\n Transport pty', 'Host x\n MaxSessions 99']) {
+    assert.throws(() => parseConfig(bad), {code: 'CONFIG_INVALID'}, bad);
+  }
+  const base = join(import.meta.dirname, '../artifacts/tests'); await mkdir(base, {recursive: true});
+  const root = await mkdtemp(join(base, 'auth-config-')); t.after(() => rm(root, {recursive: true, force: true}));
+  const store = new ConfigStore(root); await store.init();
+  const initial = await store.get();
+  const s1 = await store.save(`# comment\nHost entry\n  HostName entry.nju.edu.cn\n  User tester\nHost direct\n  HostName 127.0.0.1\n`, initial.revision);
+  const s2 = await store.setHostAuth('entry', '2fa', s1.revision);
+  assert.equal(s2.hosts[0].authMode, '2fa');
+  assert.equal(s2.hosts[1].authMode, 'auto');
+  assert.ok(s2.text.includes('# comment'));
+  await assert.rejects(store.setHostAuth('entry', 'publickey', s1.revision), {code: 'CONFIG_CONFLICT'});
+});

@@ -7,6 +7,8 @@ import {createServer} from 'node:http';
 import {generateKeyPairSync} from 'node:crypto';
 import ssh2 from 'ssh2';
 import {ConfigStore} from '../src/host/config.js';
+import {LocalManager} from '../src/host/local-manager.js';
+import {RemoteProcesses} from '../src/host/processes.js';
 import {SshConnector, browse, exec, forward, nodeCommand} from '../src/host/ssh.js';
 import {RemoteManager} from '../src/host/manager.js';
 import {sshFixture, decodeCommand} from './ssh-fixture.mjs';
@@ -125,4 +127,141 @@ test('keyboard-interactive verification codes never receive the login password',
     await assert.rejects(f.connector.connect('loopback', f.secrets), {code: 'SSH_INTERACTIVE_UNSUPPORTED'});
     assert.ok(f.server.answers.every(answer => !answer.includes('test-password')));
   }
+});
+test('two-step keyboard-interactive 2FA pauses live handshake and prefers keyboard-interactive over bare password', async t => {
+  const f = await setup(t, {
+    alsoOfferPassword: true,
+    keyboardSteps: [
+      {prompts: [{prompt: 'Password: ', echo: false}], expected: ['test-password']},
+      {prompts: [{prompt: '2nd Password: ', echo: false}], expected: ['654321']}
+    ]
+  });
+  await f.trust();
+  const seen = [];
+  const c = await f.connector.connect('loopback', {}, undefined, {
+    onChallenge: async challenge => {
+      seen.push(challenge.prompts.map(p => p.prompt));
+      return seen.length === 1 ? ['test-password'] : ['654321'];
+    }
+  });
+  assert.deepEqual(seen, [['Password: '], ['2nd Password: ']]);
+  assert.equal(f.server.passwordAttempts, 0, 'must not burn password lockout attempt when keyboard-interactive is available');
+  assert.equal((await exec(c, 'fixture')).stdout, 'SSH_FIXTURE_OK');
+  c.close();
+});
+test('single-round dual-prompt keyboard-interactive pre-fills password and prompts only for OTP', async t => {
+  const f = await setup(t, {
+    keyboardSteps: [
+      {prompts: [{prompt: 'Password: ', echo: false}, {prompt: '2nd Password: ', echo: false}], expected: ['test-password', '246810']}
+    ]
+  });
+  await f.trust();
+  const seen = [];
+  const c = await f.connector.connect('loopback', f.secrets, undefined, {
+    onChallenge: async challenge => { seen.push(challenge.prompts.map(p => p.prompt)); return ['246810']; }
+  });
+  assert.deepEqual(seen, [['2nd Password: ']]);
+  assert.equal((await exec(c, 'fixture')).stdout, 'SSH_FIXTURE_OK');
+  c.close();
+});
+test('Jobs challenge-reply bridges two-step 2FA and sessionStatus isolates local vs SSH sessions', async t => {
+  const f = await setup(t, {
+    alsoOfferPassword: true,
+    keyboardSteps: [
+      {prompts: [{prompt: 'Password: ', echo: false}], expected: ['test-password']},
+      {prompts: [{prompt: '2nd Password: ', echo: false}], expected: ['112233']}
+    ],
+    onExec: (_command, stream) => { stream.write('3.11.0\n'); stream.exit(0); stream.end(); }
+  });
+  await f.trust();
+  const sessionsMap = new Map([['local-sess', {id: 'local-sess', header: {cwd: f.root}}]]);
+  const workspaces = new Map();
+  const ctx = {
+    sessions: {get: id => sessionsMap.get(id)},
+    workspaceRegistry: {
+      get: id => workspaces.get(id),
+      async create(p, title) { const w = {id: 'w1', path: p, title, sessionIds: [], async setTitle(v) { this.title = v; }}; workspaces.set(w.id, w); return w; }
+    }
+  };
+  const manager = new LocalManager(f.store, ctx);
+  t.after(() => manager.dispose());
+  await manager.init();
+  assert.deepEqual(manager.mounts.sessionStatus('local-sess'), {ssh: false});
+  const {jobId} = manager.job('check', {alias: 'loopback'});
+  for (const answer of ['test-password', '112233']) {
+    let snapshot;
+    for (let i = 0; i < 60; i++) {
+      snapshot = manager.poll(jobId);
+      if (snapshot.challenge) break;
+      await new Promise(r => setTimeout(r, 20));
+    }
+    assert.ok(snapshot.challenge, 'expected interactive challenge');
+    assert.ok(!JSON.stringify(snapshot).includes('test-password'));
+    manager.replyChallenge(jobId, snapshot.challenge.id, [answer]);
+  }
+  let done;
+  for (let i = 0; i < 60; i++) {
+    done = manager.poll(jobId);
+    if (done.done) break;
+    await new Promise(r => setTimeout(r, 20));
+  }
+  assert.equal(done.error, undefined);
+  assert.equal(done.result.ready, true);
+  assert.equal(done.result.python, '3.11.0');
+  const opened = await manager.open('loopback', '/project 空格');
+  sessionsMap.set('ssh-sess', {id: 'ssh-sess', header: {cwd: opened.localRoot}});
+  const status = manager.mounts.sessionStatus('ssh-sess');
+  assert.equal(status.ssh, true);
+  assert.equal(status.alias, 'loopback');
+  assert.equal(status.state, 'connected');
+});
+test('Transport auto falls back to single-channel ShellTransport when bastion rejects exec', async t => {
+  const f = await setup(t, {
+    execDisabled: true,
+    onShell: stream => {
+      stream.write('Welcome to NJU Bastion (TERM-SSHD)\r\nlogin2$ ');
+      let buf = '', rpcMode = false;
+      stream.on('data', chunk => {
+        buf += chunk.toString('utf8');
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).replace(/\r$/, '').trim();
+          buf = buf.slice(idx + 1);
+          if (!line) continue;
+          const m = line.match(/printf '\\n(__DSH_SH_[^']+__)\\n'/);
+          if (m) { stream.write(`\n${m[1]}\r\n`); continue; }
+          if (!rpcMode && line.startsWith('python3 -u -c')) { rpcMode = true; continue; }
+          if (rpcMode && line.startsWith('{')) {
+            const req = JSON.parse(line);
+            if (req.op === 'init_file') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: true})}\n`);
+            else if (req.op === 'ping') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {python: '3.9.21'}})}\n`);
+            else if (req.op === 'browse') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {path: req.path === '.' ? '/' : req.path, directories: []}})}\n`);
+            else if (req.op === 'file') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {ok: true, value: {type: 'file', size: 5, version: '1:5:0:0'}}})}\n`);
+            else if (req.op === 'exec_start') {
+              stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {pid: 999}})}\n`);
+              stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, event: 'stdout', data: Buffer.from('SHELL_EXEC_OK\n').toString('base64')})}\n`);
+              stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, event: 'exit', exitCode: 0})}\n`);
+            }
+          }
+        }
+      });
+    }
+  });
+  await f.trust();
+  const ctx = {workspaceRegistry: {async create(p, title) { return {id: 'w-sh', path: p, title, sessionIds: [], async setTitle(v) { this.title = v; }}; }}};
+  const manager = new LocalManager(f.store, ctx);
+  t.after(() => manager.dispose());
+  await manager.init();
+  const res = await manager.check('loopback', f.secrets);
+  assert.equal(res.ready, true);
+  assert.equal(res.transport, 'shell');
+  assert.equal(res.python, '3.9.21');
+  const opened = await manager.open('loopback', '/project 空格', f.secrets);
+  const stat = await manager.mounts.request(opened, {action: 'stat', path: '/project 空格/a.txt'});
+  assert.equal(stat.type, 'file');
+  const processes = new RemoteProcesses(manager.mounts);
+  t.after(() => processes.dispose());
+  const out = await processes.execute(opened, 'echo hi', opened.localRoot);
+  assert.equal(out.exitCode, 0);
+  assert.equal(out.stdout, 'SHELL_EXEC_OK\n');
 });

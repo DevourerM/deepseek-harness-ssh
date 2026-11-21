@@ -3,6 +3,7 @@ import {readFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {win32} from 'node:path';
 import {quote, openSession} from './ssh.js';
+import {getShellTransport, isExecFallbackError} from './shell-transport.js';
 import {installSubagentAdapter} from './subagents.js';
 import {RemoteTerminals, installTerminalAdapter} from './terminals.js';
 
@@ -17,9 +18,10 @@ export class RemoteProcesses {
   constructor(mounts) { this.mounts = mounts; }
   spawn(record, spec) {
     const out = new PassThrough(), err = new PassThrough(), input = new PassThrough();
-    const control = randomUUID(); let stream, connection, pid, killing = false, finished = false, terminated = false;
+    const control = randomUUID(); let stream, shellProc, connection, pid, killing = false, finished = false, terminated = false;
     const stop = () => {
       terminated = true;
+      if (shellProc && !killing && !finished) { killing = true; shellProc.kill(); return; }
       if (!connection || !pid || killing || finished) return;
       killing = true;
       // OpenSSH servers may ignore SSH channel signal requests. A separate
@@ -44,10 +46,42 @@ export class RemoteProcesses {
         if (/^[a-z]:[\\/]/i.test(value) && !this.mounts.byPath(value)) throw Error('此远程进程不能访问本机暂存路径：' + key);
         env[key] = mapArg(value);
       }
+      const runShellProcess = async () => {
+        const hasPipe = spec.stdio?.stdin === 'pipe', hasInitStdin = typeof spec.stdio?.stdin === 'object';
+        return await new Promise(async (resolve, reject) => {
+          try {
+            shellProc = await getShellTransport(c.client).startProcess(
+              {argv, cwd, env, hasStdin: hasPipe || hasInitStdin},
+              {
+                onStdout: data => out.write(data),
+                onStderr: data => err.write(data),
+                onExit: (code, sig) => resolve({exitCode: typeof code === 'number' ? code : null, signal: sig || (terminated ? 'SIGTERM' : null)}),
+                signal: spec.signal
+              }
+            );
+            if (terminated || spec.signal?.aborted) stop();
+            if (hasPipe) {
+              input.on('data', chunk => shellProc.sendStdin(chunk));
+              input.once('end', () => shellProc.endStdin());
+            } else if (hasInitStdin) {
+              await shellProc.sendStdin(Buffer.from(spec.stdio.stdin.data));
+              await shellProc.endStdin();
+            }
+          } catch (e) { reject(e); }
+        });
+      };
+      if (c.host?.transport === 'shell' || c.useShell) return await runShellProcess();
       const source = await readFile(new URL('./process-worker.py', import.meta.url), 'utf8');
       const code = `import base64;exec(base64.b64decode('${Buffer.from(source).toString('base64')}'))`;
       const command = `python3 -c ${quote(code)} ${quote(Buffer.from(JSON.stringify({argv, cwd, env, control})).toString('base64'))}`;
-      stream = await openSession(c.client, 'exec', [command], {kind: 'persistent', signal: spec.signal});
+      try {
+        stream = await openSession(c.client, 'exec', [command], {kind: 'persistent', signal: spec.signal});
+        c.execConfirmed = true;
+      } catch (error) {
+        if (c.host?.transport !== 'auto' || c.execConfirmed || !isExecFallbackError(error)) throw error;
+        c.useShell = true;
+        return await runShellProcess();
+      }
       if (terminated || spec.signal?.aborted) handle.terminate();
       let pending = Buffer.alloc(0), controlSeen = false;
       stream.on('data', data => out.write(data));
