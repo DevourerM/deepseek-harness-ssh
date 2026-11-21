@@ -1,6 +1,18 @@
 """Persistent single-channel JSON-RPC worker for SSH bastions that block exec."""
 import os, sys, json, base64, signal, subprocess, threading
 
+if sys.stdin.isatty():
+    try:
+        import termios
+        settings = termios.tcgetattr(sys.stdin)
+        settings[0] &= ~(termios.IXON | termios.IXOFF)
+        settings[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+        settings[6][termios.VMIN] = 1
+        settings[6][termios.VTIME] = 0
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, settings)
+    except Exception:
+        sys.exit(1)
+
 PREFIX = '__DSH_RPC__:'
 FILE_NS = {'__name__': 'dsh_file_worker'}
 write_lock = threading.Lock()
@@ -60,7 +72,7 @@ def start_proc(rid, spec):
     def pump(stream, kind):
         try:
             while True:
-                chunk = stream.read(16384)
+                chunk = stream.read1(16384)
                 if not chunk:
                     break
                 emit(dict(id=rid, event=kind, data=base64.b64encode(chunk).decode()))
