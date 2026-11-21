@@ -4,6 +4,7 @@ import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:http';
+import {createServer as createTcpServer} from 'node:net';
 import {generateKeyPairSync} from 'node:crypto';
 import ssh2 from 'ssh2';
 import {ConfigStore} from '../src/host/config.js';
@@ -264,4 +265,105 @@ test('Transport auto falls back to single-channel ShellTransport when bastion re
   const out = await processes.execute(opened, 'echo hi', opened.localRoot);
   assert.equal(out.exitCode, 0);
   assert.equal(out.stdout, 'SHELL_EXEC_OK\n');
+});
+test('connectTcp falls back to RFC1035 DNS-over-TCP when system getaddrinfo fails while pinning original hostname', async t => {
+  const f = await setup(t);
+  let dnsQueries = 0;
+  const dnsServer = createTcpServer(socket => {
+    let buf = Buffer.alloc(0);
+    socket.on('data', chunk => {
+      buf = Buffer.concat([buf, chunk]);
+      if (buf.length < 2) return;
+      const len = buf.readUInt16BE(0);
+      if (buf.length < 2 + len) return;
+      dnsQueries++;
+      const req = buf.subarray(2, 2 + len);
+      const id = req.subarray(0, 2);
+      const question = req.subarray(12);
+      const header = Buffer.concat([id, Buffer.from([0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00])]);
+      const answer = Buffer.from([0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 127, 0, 0, 1]);
+      const payload = Buffer.concat([header, question, answer]);
+      const frame = Buffer.alloc(2 + payload.length);
+      frame.writeUInt16BE(payload.length, 0);
+      payload.copy(frame, 2);
+      socket.end(frame);
+    });
+  });
+  await new Promise(resolve => dnsServer.listen(0, '127.0.0.1', resolve));
+  t.after(() => dnsServer.close());
+  const dnsPort = dnsServer.address().port;
+  const cfg = await f.store.get();
+  await f.store.save(`${cfg.text}\nHost dnsfallback\n  HostName fake-unresolvable.invalid\n  User tester\n  Port ${f.server.port}\n  IdentityAgent none\n  ConnectTimeout 2\n`, cfg.revision);
+  const dnsOptions = {servers: ['127.0.0.1'], port: dnsPort};
+  const unknown = await f.connector.connect('dnsfallback', {dnsfallback: {password: 'test-password'}}, undefined, {dnsOptions}).catch(e => e);
+  assert.equal(unknown.code, 'HOST_KEY_UNKNOWN');
+  assert.equal(unknown.details.endpoint, `[fake-unresolvable.invalid]:${f.server.port}`);
+  await f.connector.trust(unknown.details.challengeId);
+  const c = await f.connector.connect('dnsfallback', {dnsfallback: {password: 'test-password'}}, undefined, {dnsOptions});
+  assert.equal((await exec(c, 'fixture')).stdout, 'SSH_FIXTURE_OK');
+  assert.ok(dnsQueries >= 1);
+  c.close();
+});
+test('partialSuccess keyboard-interactive -> password Step 2 prompts only OTP and failed 2fa carries sanitized trace', async t => {
+  const f = await setup(t, {
+    keyboardSteps: [{prompts: [{prompt: 'Password: ', echo: false}], expected: ['step1-secret']}],
+    partialPasswordOtp: '888999'
+  });
+  await f.trust();
+  const cfg = await f.store.get();
+  await f.store.save(cfg.text.replace('ConnectTimeout 2', 'AuthMode 2fa\n  ConnectTimeout 2'), cfg.revision);
+  const bad = await f.connector.connect('loopback', {loopback: {password: 'step1-secret', otp: 'wrong-otp'}}).catch(e => e);
+  assert.equal(bad.code, 'SSH_AUTH_FAILED');
+  assert.equal(bad.details.authMode, '2fa');
+  assert.ok(Array.isArray(bad.details.trace) && bad.details.trace.some(x => x.includes('partial:[password]')));
+  assert.ok(!JSON.stringify(bad.details).includes('step1-secret'));
+  assert.ok(!JSON.stringify(bad.details).includes('wrong-otp'));
+  const prompts = [];
+  const conn = await f.connector.connect('loopback', {}, undefined, {
+    onChallenge: info => {
+      prompts.push(info.prompts[0].prompt);
+      return [prompts.length === 1 ? 'step1-secret' : '888999'];
+    }
+  });
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0], /Password/);
+  assert.match(prompts[1], /2nd Password/);
+  conn.close();
+});
+test('SFTP refusal and silent non-PTY bastion automatically fall back to PTY ShellTransport', {timeout: 15000}, async t => {
+  const f = await setup(t, {
+    execDisabled: true,
+    sftpDisabled: true,
+    ptyRequired: true,
+    onShell: stream => {
+      let buf = '', rpcMode = false;
+      stream.on('data', chunk => {
+        buf += chunk.toString('utf8');
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).replace(/\r$/, '').trim();
+          buf = buf.slice(idx + 1);
+          if (!line) continue;
+          const m = line.match(/printf '\\n(__DSH_SH_[^']+__)\\n'/);
+          if (m) { stream.write(`\n${m[1]}\r\n`); continue; }
+          if (!rpcMode && line.startsWith('python3 -u -c')) { rpcMode = true; continue; }
+          if (rpcMode && line.startsWith('{')) {
+            const req = JSON.parse(line);
+            if (req.op === 'init_file') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: true})}\n`);
+            else if (req.op === 'ping') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {python: '3.10.12'}})}\n`);
+            else if (req.op === 'browse') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {path: req.path === '.' ? '/' : req.path, directories: []}})}\n`);
+          }
+        }
+      });
+    }
+  });
+  await f.trust();
+  const ctx = {workspaceRegistry: {async create(p, title) { return {id: 'w-pty', path: p, title, sessionIds: [], async setTitle(v) { this.title = v; }}; }}};
+  const manager = new LocalManager(f.store, ctx);
+  t.after(() => manager.dispose());
+  await manager.init();
+  const res = await manager.check('loopback', f.secrets);
+  assert.equal(res.ready, true);
+  assert.equal(res.transport, 'shell');
+  assert.equal(res.python, '3.10.12');
 });

@@ -67,7 +67,7 @@ function useOperation() {
     catch (e) { if (alive.current && e.name !== 'AbortError') setError(e); }
     finally { controller.current = null; if (alive.current) { setBusy(false); setChallenge(null); setChallengeBusy(false); } }
   };
-  return {busy, error, result, challenge, challengeBusy, run,
+  return {busy, error, result, challenge, challengeBusy, canRetry: !!retry.current, run,
     cancel: () => controller.current?.abort(),
     clearError: () => { if (alive.current) setError(null); },
     clearCredentials: () => { credentials.current = {}; },
@@ -79,6 +79,7 @@ function useOperation() {
       finally { if (alive.current) setChallengeBusy(false); }
     },
     authenticate: value => { credentials.current = mergeSecrets(credentials.current, value); return run(retry.current, false); },
+    retryFresh: () => { credentials.current = {}; return retry.current ? run(retry.current, false) : undefined; },
     trust: () => { const fn = retry.current; return run(async (signal, extra, cb) => { await api({action: 'trust', challengeId: error.details.challengeId}, signal); return fn(signal, extra, cb); }, false); }};
 }
 function mergeSecrets(base = {}, extra = {}) { const result = {...base}; for (const [alias, value] of Object.entries(extra)) result[alias] = {...result[alias], ...value}; return result; }
@@ -130,11 +131,20 @@ function InteractiveChallengePrompt({challenge, busy, submit, cancel}) {
       h('button', {className: 'ds-ssh-button ds-ssh-primary', type: 'submit', disabled: busy || !ready}, '验证并继续'),
       cancel && h(Button, {onClick: cancel, disabled: busy}, '取消')));
 }
-function Notice({op, onCredentials}) {
+function Notice({op, onCredentials, onRetry2fa}) {
   if (op.challenge) return h(InteractiveChallengePrompt, {key: op.challenge.id, challenge: op.challenge, busy: op.challengeBusy, submit: op.replyChallenge, cancel: op.cancel});
   if (!op.error) return op.busy ? h('div', {className: 'ds-ssh-notice', role: 'status'}, '正在处理… ', h(Button, {onClick: op.cancel}, '取消操作')) : null;
   const error = op.error;
-  if (['SSH_AUTH_REQUIRED', 'SSH_AUTH_FAILED'].includes(error.code)) return h(AuthenticationPrompt, {key: `${error.details.alias}:${error.details.kind}:${error.code}`, error, busy: op.busy, submit: value => { onCredentials?.(value); op.authenticate(value); }});
+  if (['SSH_AUTH_REQUIRED', 'SSH_AUTH_FAILED'].includes(error.code)) {
+    if (error.details?.authMode === '2fa') {
+      return h('div', {className: 'ds-ssh-error', role: 'alert'},
+        h('div', null, error.message),
+        Array.isArray(error.details?.trace) && error.details.trace.length > 0 && h('p', {className: 'ds-ssh-muted ds-ssh-trace'}, `阶段记录：${error.details.trace.join(' → ')}`),
+        (onRetry2fa || op.canRetry) && h('div', {className: 'ds-ssh-row'},
+          h(Button, {primary: true, disabled: op.busy, onClick: () => { op.clearCredentials(); (onRetry2fa ? onRetry2fa() : op.retryFresh()); }}, '重新开始两步认证')));
+    }
+    return h(AuthenticationPrompt, {key: `${error.details.alias}:${error.details.kind}:${error.code}`, error, busy: op.busy, submit: value => { onCredentials?.(value); op.authenticate(value); }});
+  }
   if (error.code === 'HOST_KEY_UNKNOWN') return h('div', {className: 'ds-ssh-trust', role: 'alert'},
     h('strong', null, '确认远端主机身份'), h('p', null, error.details.alias + ' · ' + error.details.endpoint), h('code', null, error.details.fingerprint),
     h('p', null, '请与管理员或服务器本机显示的 SSH 主机指纹核对。一致后再信任。'),
@@ -311,25 +321,34 @@ function WorkspaceConfigurationDialog({ctx, request, close}) {
   const dismiss = () => { op.cancel(); close(); };
   const browsePath = target => op.run(async (signal, extra, onChallenge) => { const value = await action({action: 'browse', alias, path: target, secrets: mergeSecrets(secrets, extra)}, signal, onChallenge); setPath(value.path); setListing(value); applyStatus(await api({action: 'hosts-status'}, signal)); return value; });
   const remote = workspace?.kind === 'remote';
+  const hostChanged = !!(remote && workspace && alias !== (workspace.alias || ''));
   const changed = workspace && (title !== workspace.title || alias !== (workspace.alias || '') || path !== workspace.path);
   const selectedHost = hosts.find(host => host.alias === alias);
   const selectedStatus = statusMap[alias];
   const connected = !!selectedStatus?.connected;
+  const saveWorkspace = () => op.run(async (signal, extra, onChallenge) => {
+    const value = await action({action: 'update-workspace', workspaceId: workspace.workspaceId, revision: workspace.revision, title, path, ...(remote ? {alias, secrets: mergeSecrets(secrets, extra)} : {})}, signal, onChallenge);
+    setWorkspace(value); setTitle(value.title || ''); setPath(value.path); setAlias(value.alias || ''); setListing(null); setSecrets({}); setSaved(true);
+    applyStatus(await api({action: 'hosts-status'}, signal));
+    return value;
+  });
   return h('div', {className: 'ds-ssh-backdrop', onKeyDown: event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dismiss(); } }},
     h('div', {className: 'ds-ssh-dialog', ref: dialog, role: 'dialog', 'aria-modal': true, 'aria-label': '工作区配置', tabIndex: -1},
       h('div', {className: 'ds-ssh-row ds-ssh-dialog-header'}, h('div', null, h('span', {className: 'ds-ssh-kicker'}, remote ? 'SSH 远程工作区' : '工作区'), h('h2', null, '工作区配置')), h(Button, {'aria-label': '关闭工作区配置', className: 'ds-ssh-icon-btn', onClick: dismiss}, '×')),
       h('p', {className: 'ds-ssh-muted'}, '修改当前工作区的配置，保留已有对话与工作区关联。'),
       h('div', {ref: noticeRef},
         saved && h('div', {className: 'ds-ssh-notice', role: 'status'}, '工作区配置已保存，已有对话已保留。重新打开文件面板可查看更新后的目录。'),
-        h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value))})),
+        h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value)), onRetry2fa: () => { setSecrets({}); op.retryFresh(); }})),
       workspace && h('div', {className: 'ds-ssh-stack'},
         h(Field, {label: '工作区名称', value: title, maxLength: 120, disabled: op.busy, onChange: event => { setTitle(event.target.value); setSaved(false); }}),
         remote ? h(React.Fragment, null,
           h('div', {className: 'ds-ssh-status-bar'},
-            h('span', {className: `ds-ssh-pill${connected ? ' ds-ssh-pill-ok' : ''}`}, connected ? `已连接 · ${alias}` : `未连接 · ${alias || '未选择'}`),
-            alias && selectedHost && (connected
-              ? h(Button, {disabled: op.busy, onClick: () => op.run(async signal => { await api({action: 'disconnect', id: alias}, signal); applyStatus(await api({action: 'hosts-status'}, signal)); })}, '断开连接')
-              : h(Button, {disabled: op.busy, onClick: () => op.run(async (signal, extra, onChallenge) => { await action({action: 'connect', alias, secrets: mergeSecrets(secrets, extra)}, signal, onChallenge); applyStatus(await api({action: 'hosts-status'}, signal)); })}, '立即登录'))),
+            h('span', {className: `ds-ssh-pill${connected && !hostChanged ? ' ds-ssh-pill-ok' : ''}`}, hostChanged ? `待切换 · ${workspace.alias || '未选择'} → ${alias}` : connected ? `已连接 · ${alias}` : `未连接 · ${alias || '未选择'}`),
+            alias && selectedHost && (hostChanged
+              ? h(Button, {primary: true, disabled: op.busy || !title.trim() || !path.trim(), onClick: saveWorkspace}, '切换并登录（保存）')
+              : connected
+                ? h(Button, {disabled: op.busy, onClick: () => op.run(async signal => { await api({action: 'disconnect', id: alias}, signal); applyStatus(await api({action: 'hosts-status'}, signal)); })}, '断开连接')
+                : h(Button, {disabled: op.busy, onClick: () => op.run(async (signal, extra, onChallenge) => { await action({action: 'connect', alias, secrets: mergeSecrets(secrets, extra)}, signal, onChallenge); applyStatus(await api({action: 'hosts-status'}, signal)); })}, '立即登录'))),
           h('label', {className: 'ds-ssh-field'}, 'SSH 主机', h('select', {value: alias, disabled: op.busy, onChange: event => { setAlias(event.target.value); setListing(null); setSaved(false); setAuthSaved(false); }},
             !hosts.some(host => host.alias === alias) && h('option', {value: alias}, `${alias}（请在 SSH 设置中配置）`),
             hosts.map(host => h('option', {key: host.alias, value: host.alias}, `${host.alias} — ${host.username}@${host.hostname}:${host.port}`)))),
@@ -350,12 +369,7 @@ function WorkspaceConfigurationDialog({ctx, request, close}) {
           h('p', {className: 'ds-ssh-muted'}, '保存时检查远程目录。切换主机或目录前，请先结束此工作区正在运行的任务和终端。')) :
           h(React.Fragment, null, h(Field, {label: '本地目录', value: path, readOnly: true}), h('p', {className: 'ds-ssh-muted'}, '本地工作区支持修改名称。当前 DSH 将本地目录固定关联到已有对话。')),
         h('div', {className: 'ds-ssh-row'},
-          h(Button, {primary: true, disabled: op.busy || !changed || !title.trim() || !path.trim() || (remote && !hosts.some(host => host.alias === alias)), onClick: () => op.run(async (signal, extra, onChallenge) => {
-            const value = await action({action: 'update-workspace', workspaceId: workspace.workspaceId, revision: workspace.revision, title, path, ...(remote ? {alias, secrets: mergeSecrets(secrets, extra)} : {})}, signal, onChallenge);
-            setWorkspace(value); setTitle(value.title || ''); setPath(value.path); setAlias(value.alias || ''); setListing(null); setSecrets({}); setSaved(true);
-            applyStatus(await api({action: 'hosts-status'}, signal));
-            return value;
-          })}, '保存配置'),
+          h(Button, {primary: true, disabled: op.busy || !changed || !title.trim() || !path.trim() || (remote && !hosts.some(host => host.alias === alias)), onClick: saveWorkspace}, '保存配置'),
           h(Button, {disabled: op.busy, onClick: () => op.run(load)}, '重新加载'),
           h(Button, {disabled: op.busy, onClick: dismiss}, '完成')))));
 }
@@ -366,7 +380,7 @@ function ConversationSshDock({sessionId, requests}) {
   useEffect(() => {
     setDismissed(false); startedAuthRef.current = null; setSelectedAlias('');
     if (!sessionId) { setStatus(null); return; }
-    let closed = false, timer;
+    let closed = false, timer, lastAlias = '';
     const controller = new AbortController();
     const poll = async () => {
       try {
@@ -375,7 +389,8 @@ function ConversationSshDock({sessionId, requests}) {
         setStatus(next);
         if (!next?.ssh) return;
         setSelectedAlias(old => old || next.alias);
-        if (!hosts.length) {
+        if (!lastAlias || lastAlias !== next.alias) {
+          lastAlias = next.alias;
           api({action: 'hosts-status'}, controller.signal).then(data => { if (!closed && data?.hosts) setHosts(data.hosts); }).catch(() => {});
         }
         timer = setTimeout(poll, next.state === 'connected' && !next.auth ? 3500 : 1200);
@@ -431,7 +446,10 @@ function ConversationSshDock({sessionId, requests}) {
       } else {
         await action({action: 'connect', alias: status.alias, secrets}, signal, onChallenge);
       }
-      setStatus(await api({action: 'session-ssh-state', sessionId}, signal));
+      const latest = await api({action: 'session-ssh-state', sessionId}, signal);
+      setStatus(latest);
+      if (latest?.alias) setSelectedAlias(latest.alias);
+      api({action: 'hosts-status'}, signal).then(data => { if (data?.hosts) setHosts(data.hosts); }).catch(() => {});
     });
   };
   const cancelConnect = () => {
@@ -455,7 +473,7 @@ function ConversationSshDock({sessionId, requests}) {
         op.busy || auth
           ? h(Button, {onClick: cancelConnect}, '取消')
           : h(Button, {'aria-label': '收起 SSH 提示', className: 'ds-ssh-icon-btn', onClick: () => setDismissed(true)}, '×'))),
-    showDetail && h('div', {className: 'ds-ssh-dock-body'}, h(Notice, {op})));
+    showDetail && h('div', {className: 'ds-ssh-dock-body'}, h(Notice, {op, onRetry2fa: () => op.retryFresh()})));
 }
 function apply(ctx) {
   const requests = {current: null, listeners: new Set(), set(value) { this.current = value; for (const listener of this.listeners) listener(value); }};

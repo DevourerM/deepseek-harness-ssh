@@ -12,38 +12,49 @@ function openShellStream(client, {pty = false, cols = 200, rows = 50, term = 'du
   return openSession(client, 'shell', [arg], {kind: 'persistent', signal, timeout});
 }
 
+async function tryLaunchInShell(client, {pty, cols, rows, term, signal, timeout}) {
+  const stream = await openShellStream(client, {pty, cols, rows, term, signal, timeout});
+  const nonce = randomUUID().replaceAll('-', '');
+  const marker = `__DSH_SH_${nonce}__`;
+  try {
+    await new Promise((resolve, reject) => {
+      let buffer = '', settled = false;
+      const finish = err => {
+        if (settled) return; settled = true;
+        clearTimeout(timer); stream.off('data', onData); stream.off('close', onClose); stream.off('error', finish);
+        signal?.removeEventListener('abort', onAbort);
+        err ? reject(err) : resolve();
+      };
+      const onAbort = () => { stream.destroy(); finish(signal.reason || new SshError('操作已取消', 'CANCELLED')); };
+      const onClose = () => finish(new SshError('SSH Shell 通道已关闭', 'SSH_CLOSED'));
+      const timer = setTimeout(() => { stream.destroy(); finish(new SshError('SSH Shell 启动超时', 'REMOTE_TIMEOUT')); }, timeout);
+      const onData = chunk => {
+        buffer = (buffer + chunk.toString('utf8')).slice(-32768);
+        // Match marker on its own output line, ignoring echoed command line.
+        const lines = buffer.split(/\r?\n/);
+        if (lines.some(line => line.trim() === marker)) finish();
+      };
+      stream.on('data', onData);
+      stream.once('close', onClose);
+      stream.once('error', finish);
+      signal?.addEventListener('abort', onAbort, {once: true});
+      stream.write(`\nstty -echo 2>/dev/null; printf '\\n${marker}\\n'\n`);
+    });
+    return stream;
+  } catch (error) {
+    stream.destroy();
+    throw error;
+  }
+}
+
 export async function launchInShell(client, command, {pty = true, cols = 500, rows = 50, term = 'xterm-256color', signal, timeout = 20000} = {}) {
   let stream;
   try {
-    stream = await openShellStream(client, {pty, cols, rows, term, signal, timeout});
-  } catch {
-    stream = await openShellStream(client, {pty: !pty, cols, rows, term, signal, timeout});
+    stream = await tryLaunchInShell(client, {pty, cols, rows, term, signal, timeout: pty ? timeout : Math.min(timeout, 6000)});
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    stream = await tryLaunchInShell(client, {pty: !pty, cols, rows, term, signal, timeout});
   }
-  const nonce = randomUUID().replaceAll('-', '');
-  const marker = `__DSH_SH_${nonce}__`;
-  await new Promise((resolve, reject) => {
-    let buffer = '', settled = false;
-    const finish = err => {
-      if (settled) return; settled = true;
-      clearTimeout(timer); stream.off('data', onData); stream.off('close', onClose); stream.off('error', finish);
-      signal?.removeEventListener('abort', onAbort);
-      err ? reject(err) : resolve();
-    };
-    const onAbort = () => { stream.end(); finish(signal.reason || new SshError('操作已取消', 'CANCELLED')); };
-    const onClose = () => finish(new SshError('SSH Shell 通道已关闭', 'SSH_CLOSED'));
-    const timer = setTimeout(() => { stream.end(); finish(new SshError('SSH Shell 启动超时', 'REMOTE_TIMEOUT')); }, timeout);
-    const onData = chunk => {
-      buffer = (buffer + chunk.toString('utf8')).slice(-32768);
-      // Match marker on its own output line, ignoring echoed command line.
-      const lines = buffer.split(/\r?\n/);
-      if (lines.some(line => line.trim() === marker)) finish();
-    };
-    stream.on('data', onData);
-    stream.once('close', onClose);
-    stream.once('error', finish);
-    signal?.addEventListener('abort', onAbort, {once: true});
-    stream.write(`\nstty -echo 2>/dev/null; printf '\\n${marker}\\n'\n`);
-  });
   stream.write(`${command}\n`);
   return stream;
 }
@@ -172,6 +183,6 @@ export function getShellTransport(client) {
 
 export function isExecFallbackError(error) {
   if (!error) return false;
-  if (['SSH_CHANNEL_BUSY', 'REMOTE_COMMAND', 'PROBE_FAILED'].includes(error.code)) return true;
-  return /Unable to exec|Channel open failure|exec request|not supported|unsupported|open failed/i.test(error.message || '');
+  if (['SSH_CHANNEL_BUSY', 'REMOTE_COMMAND', 'PROBE_FAILED', 'SFTP_TIMEOUT'].includes(error.code)) return true;
+  return /Unable to exec|Unable to start SFTP|subsystem|Channel open failure|exec request|not supported|unsupported|open failed/i.test(error.message || '');
 }

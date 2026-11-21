@@ -318,3 +318,22 @@ test('open waits for target edits and persists both records without lost updates
   assert.equal(f.manager.mounts.records.length, 2); assert.equal((await diskRecords(f)).length, 2);
   assert.equal(f.record.remoteRoot, '/edited'); assert.notEqual(opened.workspaceId, f.record.workspaceId);
 });
+
+test('disconnected stale terminal does not block same-path host switch, while connected terminal or path change still blocks', async t => {
+  const f = await fixture(t);
+  let closedId = '';
+  f.services.set('terminalController', {
+    list: () => [{id: 'stale-term', state: 'running'}],
+    close: async id => { closedId = id; }
+  });
+  // Ensure old host is disconnected: same-path switch succeeds and clears stale terminal & pending auth.
+  const badPathUpdate = await inputFor(f, {alias: 'next', path: '/changed'});
+  await assert.rejects(() => f.manager.updateWorkspace(badPathUpdate), {code: 'WORKSPACE_ACTIVE'});
+  const switched = await f.manager.updateWorkspace(await inputFor(f, {alias: 'next', path: '/original', title: 'Switched'}));
+  assert.equal(switched.alias, 'next');
+  assert.equal(closedId, 'stale-term');
+  // When current host is actively connected, running terminal still blocks even for same-path switch.
+  f.manager.mounts.connections.set('next', {client: {}, close() {}});
+  const activeTermUpdate = await inputFor(f, {alias: 'old', path: '/original'});
+  await assert.rejects(() => f.manager.updateWorkspace(activeTermUpdate), {code: 'WORKSPACE_ACTIVE'});
+});

@@ -26,13 +26,13 @@ export class WorkspaceConfig {
     const value = {workspaceId: workspace.id, kind: record ? 'remote' : 'local', title: workspace.title, path: record ? record.remoteRoot : workspace.path, alias: record?.alias || ''};
     return {...value, revision: revisionOf(JSON.stringify([value, config.revision, record && [record.id, record.localRoot, record.title]]))};
   }
-  async inactive(workspace, {allowScheduleOnly = false} = {}) {
+  async inactive(workspace, {allowScheduleOnly = false, allowDisconnectedTerminals = false} = {}) {
     for (const sessionId of workspace.sessionIds) {
       const activity = await this.mounts.ctx.waterfall('workspace/session-activity', {sessionId}, () => Promise.resolve([]));
       const blocking = allowScheduleOnly ? activity.filter(item => item.kind !== 'schedule') : activity;
       const terminals = this.mounts.ctx.get?.('terminalController')?.list(sessionId) || [];
       const retained = terminals.filter(terminal => terminal.state === 'running');
-      if (retained.length) blocking.push({kind: 'terminals', items: retained.map(terminal => ({id: terminal.id}))});
+      if (retained.length && !allowDisconnectedTerminals) blocking.push({kind: 'terminals', items: retained.map(terminal => ({id: terminal.id}))});
       if (blocking.length) throw new SshError('工作区仍有运行中的会话，请停止相关活动后修改连接或目录', 'WORKSPACE_ACTIVE', {sessionId, activity: blocking}, 409);
     }
   }
@@ -52,22 +52,38 @@ export class WorkspaceConfig {
     }
     const alias = validText(input.alias, 'SSH 主机', 80), path = validText(input.path, '远程目录', 4096);
     if (input.secrets !== undefined && (!input.secrets || typeof input.secrets !== 'object' || Array.isArray(input.secrets))) throw new SshError('凭据格式无效', 'REQUEST_INVALID');
-    const requestedTargetChange = alias !== record.alias || path !== record.remoteRoot;
-    const samePathSwitch = alias !== record.alias && path === record.remoteRoot;
+    const oldAlias = record.alias;
+    const requestedTargetChange = alias !== oldAlias || path !== record.remoteRoot;
+    const samePathSwitch = alias !== oldAlias && path === record.remoteRoot;
+    const oldDisconnected = !this.mounts.connections.has(oldAlias);
     let directory = {path: record.remoteRoot};
     if (requestedTargetChange) {
-      await this.inactive(workspace, {allowScheduleOnly: samePathSwitch});
+      await this.inactive(workspace, {allowScheduleOnly: samePathSwitch, allowDisconnectedTerminals: samePathSwitch && oldDisconnected});
       // Verify and canonicalize on the authenticated target before persistence.
       directory = await this.mounts.browse(alias, path, input.secrets, signal, options);
       const config = await this.mounts.store.get(), mappedEndpoint = endpoint(config.hosts, alias);
       if (this.mounts.records.some(other => other !== record && other.remoteRoot === directory.path && endpoint(config.hosts, other.alias) === mappedEndpoint)) throw new SshError('该远程目录已映射到另一个工作区', 'WORKSPACE_DUPLICATE', undefined, 409);
     }
-    const targetChanged = alias !== record.alias || directory.path !== record.remoteRoot;
-    if (targetChanged) await this.inactive(workspace, {allowScheduleOnly: directory.path === record.remoteRoot});
+    const targetChanged = alias !== oldAlias || directory.path !== record.remoteRoot;
+    const canonicalSamePathSwitch = alias !== oldAlias && directory.path === record.remoteRoot;
+    const canDropDeadTerminals = canonicalSamePathSwitch && !this.mounts.connections.has(oldAlias);
+    if (targetChanged) await this.inactive(workspace, {allowScheduleOnly: canonicalSamePathSwitch, allowDisconnectedTerminals: canDropDeadTerminals});
     signal?.throwIfAborted();
     if ((await this.get(input.workspaceId)).revision !== current.revision) throw conflict();
     const next = {...record, alias, remoteRoot: directory.path, title, ...(targetChanged ? {cwdResetSessions: [...workspace.sessionIds]} : {})};
     await this.commit(workspace, title, record, next, signal);
+    if (alias !== oldAlias) {
+      this.mounts.clearPendingAuth?.(oldAlias);
+      if (canDropDeadTerminals) {
+        const controller = this.mounts.ctx.get?.('terminalController');
+        for (const sessionId of workspace.sessionIds) {
+          for (const terminal of controller?.list?.(sessionId) || []) {
+            if (terminal.state !== 'running') continue;
+            try { await (controller?.close?.(terminal.id) ?? terminal.terminate?.()); } catch {}
+          }
+        }
+      }
+    }
     return this.get(input.workspaceId);
   }
   async commit(workspace, title, record, next, signal) {

@@ -5,15 +5,20 @@ import {join, relative, resolve, sep} from 'node:path';
 import {connect as tcpConnect} from 'node:net';
 
 // Real encrypted SSH/SFTP server on loopback. Virtual POSIX paths map to a temporary directory.
-export async function sshFixture(root, {onExec, onShell, execDisabled = false, password = 'test-password', hostKey, authorizedKey, keyboardOnly = false, interactivePrompt = 'Password: ', keyboardSteps = null, alsoOfferPassword = false, maxSessions = Infinity, refuseSessions = 0} = {}) {
+export async function sshFixture(root, {onExec, onShell, execDisabled = false, sftpDisabled = false, ptyRequired = false, password = 'test-password', hostKey, authorizedKey, keyboardOnly = false, interactivePrompt = 'Password: ', keyboardSteps = null, alsoOfferPassword = false, partialPasswordOtp = null, maxSessions = Infinity, refuseSessions = 0} = {}) {
   const key = hostKey || generateKeyPairSync('rsa', {modulusLength: 2048}).privateKey.export({format: 'pem', type: 'pkcs1'});
   const connections = new Set(), processes = new Set(), forwards = new Set(), answers = []; let execCount = 0, refusedCount = 0, peakSessions = 0, passwordAttempts = 0;
   const server = new ssh2.Server({hostKeys: [key]}, client => {
     connections.add(client); client.on('error', () => {}); client.once('close', () => connections.delete(client));
+    let partialDone = false;
     client.on('authentication', ctx => {
       if (keyboardSteps) {
-        const methods = alsoOfferPassword ? ['password', 'keyboard-interactive', 'publickey'] : ['keyboard-interactive'];
-        if (ctx.method === 'password') { passwordAttempts++; return ctx.password === password ? ctx.accept() : ctx.reject(methods); }
+        const methods = partialDone ? ['password'] : (alsoOfferPassword ? ['password', 'keyboard-interactive', 'publickey'] : ['keyboard-interactive']);
+        if (ctx.method === 'password') {
+          passwordAttempts++;
+          if (partialDone && partialPasswordOtp !== null) return ctx.password === partialPasswordOtp ? ctx.accept() : ctx.reject(methods);
+          return ctx.password === password ? ctx.accept() : ctx.reject(methods);
+        }
         if (ctx.method !== 'keyboard-interactive') return ctx.reject(methods);
         const runStep = index => {
           const step = keyboardSteps[index];
@@ -22,6 +27,7 @@ export async function sshFixture(root, {onExec, onShell, execDisabled = false, p
             const ok = step.expected.every((exp, i) => response[i] === exp);
             if (!ok) return ctx.reject(methods);
             if (index + 1 < keyboardSteps.length) return runStep(index + 1);
+            if (partialPasswordOtp !== null && !partialDone) { partialDone = true; return ctx.reject(['password'], true); }
             ctx.accept();
           });
         };
@@ -58,14 +64,16 @@ export async function sshFixture(root, {onExec, onShell, execDisabled = false, p
           else { stream.write('SSH_FIXTURE_OK'); stream.exit(0); stream.end(); }
           stream.resume();
         });
-        session.on('pty', accept => accept?.());
+        let hasPty = false;
+        session.on('pty', accept => { hasPty = true; accept?.(); });
         session.on('shell', (accept, reject) => {
           if (!onShell) { reject(); release(); return; }
           const stream = accept(); stream.on('error', () => {});
           stream.once('close', release);
-          onShell(stream);
+          if (!ptyRequired || hasPty) onShell(stream);
         });
-        session.on('sftp', accept => {
+        session.on('sftp', (accept, reject) => {
+          if (sftpDisabled) { reject(); release(); return; }
           const sftp = accept(), handles = new Map(); let next = 1;
           sftp.once('close', release);
           sftp.once('end', () => sftp.end());

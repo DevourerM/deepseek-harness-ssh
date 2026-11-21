@@ -35,3 +35,4 @@
 .ds-ssh-dock .ds-ssh-field{margin:4px 0}
 .ds-ssh-dock .ds-ssh-field input{height:32px;font-size:13px;background:var(--dsw-alias-bg-base,rgba(0,0,0,.2));border-color:var(--dsw-alias-border-l2,rgba(128,128,128,.24))}
 .ds-ssh-dock .ds-ssh-password>.ds-ssh-button{margin-bottom:4px;min-height:32px}
+.ds-ssh-trace{margin:6px 0 8px;font-size:12px;font-family:ui-monospace,Consolas,monospace;word-break:break-word}
