@@ -15,6 +15,14 @@ import {SshConnector, browse, exec, forward, nodeCommand} from '../src/host/ssh.
 import {RemoteManager} from '../src/host/manager.js';
 import {sshFixture, decodeCommand} from './ssh-fixture.mjs';
 
+function readShellRequest(line, chunks, stream) {
+  assert.ok(Buffer.byteLength(line) <= 512, 'gateway terminal lines must stay short');
+  const prefix = '__DSH_CHUNK__:';
+  if (line.startsWith(prefix)) { chunks.push(line.slice(prefix.length)); stream.write('__DSH_RPC_PART_OK__\r\n'); return; }
+  if (line === '__DSH_FINAL__') return JSON.parse(Buffer.from(chunks.splice(0).join(''), 'base64').toString());
+  if (line.startsWith('{')) return JSON.parse(line);
+}
+
 async function setup(t, options) {
   const base = join(import.meta.dirname, '../artifacts/tests'); await mkdir(base, {recursive: true});
   const root = await mkdtemp(join(base, 'ssh-')); await mkdir(join(root, 'project 空格')); await writeFile(join(root, 'readme.txt'), 'not a directory');
@@ -228,6 +236,7 @@ test('Transport auto falls back to single-channel ShellTransport when bastion re
     onShell: stream => {
       stream.write('Welcome to NJU Bastion (TERM-SSHD)\r\nlogin2$ ');
       let buf = '', rpcMode = false;
+      const chunks = [];
       stream.on('data', chunk => {
         buf += chunk.toString('utf8');
         let idx;
@@ -237,9 +246,12 @@ test('Transport auto falls back to single-channel ShellTransport when bastion re
           if (!line) continue;
           const m = line.match(/printf '\\n(__DSH_SH_[^']+__)\\n'/);
           if (m) { stream.write(`\n${m[1]}\r\n`); continue; }
-          if (!rpcMode && line.startsWith('python3 -u -c')) { rpcMode = true; continue; }
-          if (rpcMode && line.startsWith('{')) {
-            const req = JSON.parse(line);
+          if (!rpcMode && line.startsWith('python3 -u -c')) { rpcMode = true; stream.write('__DSH_LOADER_READY__\r\n'); continue; }
+          if (line === '__DSH_EOF__') { stream.write('__DSH_WORKER_READY__\r\n'); continue; }
+          if (rpcMode && /^[A-Za-z0-9+/]+=*$/.test(line)) { stream.write('__DSH_PART_OK__\r\n'); continue; }
+          if (rpcMode) {
+            const req = readShellRequest(line, chunks, stream);
+            if (!req) continue;
             if (req.op === 'init_file') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: true})}\n`);
             else if (req.op === 'ping') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {python: '3.9.21'}})}\n`);
             else if (req.op === 'browse') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {path: req.path === '.' ? '/' : req.path, directories: []}})}\n`);
@@ -354,6 +366,7 @@ function terminalBastion(onRequest) {
     keyboardSteps: [{prompts: [{prompt: 'Password: ', echo: false}], expected: ['test-password']}],
     onShell(stream) {
       let state = 'otp', input = '';
+      const chunks = [];
       stream.write('\x1b[33m2nd Pass');
       stream.write('word:\x1b[0m');
       stream.on('data', chunk => {
@@ -372,14 +385,15 @@ function terminalBastion(onRequest) {
           }
           if (state === 'loader') {
             assert.match(line, /^python3 -u -c /);
-            state = 'worker'; continue;
+            state = 'worker'; stream.write('__DSH_LOADER_READY__\r\n'); continue;
           }
           if (state === 'worker') {
-            if (line === '__DSH_EOF__') state = 'rpc';
-            else { assert.ok(line.length <= 512); assert.match(line, /^[A-Za-z0-9+/]+=*$/); }
+            if (line === '__DSH_EOF__') { state = 'rpc'; stream.write('__DSH_WORKER_READY__\r\n'); }
+            else { assert.ok(line.length <= 384); assert.match(line, /^[A-Za-z0-9+/]+=*$/); stream.write('__DSH_PART_OK__\r\n'); }
             continue;
           }
-          const request = JSON.parse(line);
+          const request = readShellRequest(line, chunks, stream);
+          if (!request) continue;
           const send = value => stream.write('__DSH_RPC__:' + JSON.stringify(value) + '\r\n');
           onRequest?.(request, send);
         }
@@ -482,6 +496,7 @@ test('SFTP refusal and silent non-PTY bastion automatically fall back to PTY She
     ptyRequired: true,
     onShell: stream => {
       let buf = '', rpcMode = false;
+      const chunks = [];
       stream.on('data', chunk => {
         buf += chunk.toString('utf8');
         let idx;
@@ -491,9 +506,12 @@ test('SFTP refusal and silent non-PTY bastion automatically fall back to PTY She
           if (!line) continue;
           const m = line.match(/printf '\\n(__DSH_SH_[^']+__)\\n'/);
           if (m) { stream.write(`\n${m[1]}\r\n`); continue; }
-          if (!rpcMode && line.startsWith('python3 -u -c')) { rpcMode = true; continue; }
-          if (rpcMode && line.startsWith('{')) {
-            const req = JSON.parse(line);
+          if (!rpcMode && line.startsWith('python3 -u -c')) { rpcMode = true; stream.write('__DSH_LOADER_READY__\r\n'); continue; }
+          if (line === '__DSH_EOF__') { stream.write('__DSH_WORKER_READY__\r\n'); continue; }
+          if (rpcMode && /^[A-Za-z0-9+/]+=*$/.test(line)) { stream.write('__DSH_PART_OK__\r\n'); continue; }
+          if (rpcMode) {
+            const req = readShellRequest(line, chunks, stream);
+            if (!req) continue;
             if (req.op === 'init_file') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: true})}\n`);
             else if (req.op === 'ping') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {python: '3.10.12'}})}\n`);
             else if (req.op === 'browse') stream.write(`__DSH_RPC__:${JSON.stringify({id: req.id, ok: true, value: {path: req.path === '.' ? '/' : req.path, directories: []}})}\n`);

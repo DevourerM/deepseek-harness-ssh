@@ -1,5 +1,5 @@
 """Persistent single-channel JSON-RPC worker for SSH bastions that block exec."""
-import os, sys, json, base64, signal, subprocess, threading
+import os, sys, json, base64, signal, subprocess, threading, zlib
 
 if sys.stdin.isatty():
     try:
@@ -101,7 +101,8 @@ def handle_line(raw):
     op = req.get('op')
     try:
         if op == 'init_file':
-            exec(base64.b64decode(req['source']).decode('utf-8'), FILE_NS)
+            source = base64.b64decode(req['source'])
+            exec((zlib.decompress(source) if req.get('compressed') else source).decode('utf-8'), FILE_NS)
             emit(dict(id=rid, ok=True, value=True))
         elif op == 'ping':
             emit(dict(id=rid, ok=True, value=dict(python=sys.version.split()[0])))
@@ -135,10 +136,32 @@ def handle_line(raw):
     except Exception as error:
         emit(dict(id=rid, ok=False, code='SHELL_RPC_ERROR', message=str(error)))
 
+parts = []
+size = 0
+print('__DSH_WORKER_READY__', flush=True)
 for line in sys.stdin:
     text = line.strip()
     if not text:
         continue
     if text == '__DSH_QUIT__':
         break
+    if text.startswith('__DSH_CHUNK__:'):
+        chunk = text[len('__DSH_CHUNK__:'):]
+        size += len(chunk)
+        if size > 48 * 1024 * 1024:
+            sys.exit(1)
+        parts.append(chunk)
+        with write_lock:
+            print('__DSH_RPC_PART_OK__', flush=True)
+        continue
+    if text == '__DSH_FINAL__':
+        try:
+            text = base64.b64decode(''.join(parts), validate=True).decode('utf-8')
+        except (ValueError, UnicodeError):
+            sys.exit(1)
+        finally:
+            parts.clear()
+            size = 0
+    elif parts:
+        sys.exit(1)
     threading.Thread(target=handle_line, args=(text,), daemon=True).start()
