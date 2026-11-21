@@ -86,7 +86,7 @@ function Icon({kind, size = 22}) {
   const paths = {folder: ['M3 7h6l2-3h10v16H3z'], server: ['M4 3h16v7H4z','M4 14h16v7H4z','M7 6.5h.01','M7 17.5h.01','M11 6.5h6','M11 17.5h6'], arrow: ['m9 5 7 7-7 7'], check: ['m5 12 4 4L19 6']};
   return h('svg', {width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.6,strokeLinecap:'round',strokeLinejoin:'round','aria-hidden':true}, (paths[kind] || paths.folder).map((d,i)=>h('path',{d,key:i})));
 }
-function Button({children, onClick, disabled, primary, ...rest}) { return h('button', {type: 'button', className: `ds-ssh-button${primary ? ' ds-ssh-primary' : ''}`, disabled, onClick, ...rest}, children); }
+function Button({children, onClick, disabled, primary, className = '', ...rest}) { return h('button', {type: 'button', className: `ds-ssh-button${primary ? ' ds-ssh-primary' : ''}${className ? ' ' + className : ''}`, disabled, onClick, ...rest}, children); }
 function AuthenticationPrompt({error, busy, submit}) {
   const [value, setValue] = useState(''), [show, setShow] = useState(false); const details = error.details, passphrase = details.kind === 'passphrase';
   return h('form', {className: 'ds-ssh-trust', 'aria-label': 'SSH 认证', onSubmit: e => { e.preventDefault(); if (value) { submit({[details.alias]: {[passphrase ? 'passphrase' : 'password']: value}}); setValue(''); } }},
@@ -304,6 +304,10 @@ function WorkspaceConfigurationDialog({ctx, request, close}) {
     document.addEventListener('keydown', trap, true);
     return () => { document.removeEventListener('keydown', trap, true); previous?.isConnected && previous.focus?.(); };
   }, []);
+  const noticeRef = useRef(null);
+  useEffect(() => {
+    if (op.challenge || op.error) noticeRef.current?.scrollIntoView?.({block: 'nearest', behavior: 'smooth'});
+  }, [op.challenge?.id, op.error]);
   const dismiss = () => { op.cancel(); close(); };
   const browsePath = target => op.run(async (signal, extra, onChallenge) => { const value = await action({action: 'browse', alias, path: target, secrets: mergeSecrets(secrets, extra)}, signal, onChallenge); setPath(value.path); setListing(value); applyStatus(await api({action: 'hosts-status'}, signal)); return value; });
   const remote = workspace?.kind === 'remote';
@@ -313,8 +317,11 @@ function WorkspaceConfigurationDialog({ctx, request, close}) {
   const connected = !!selectedStatus?.connected;
   return h('div', {className: 'ds-ssh-backdrop', onKeyDown: event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dismiss(); } }},
     h('div', {className: 'ds-ssh-dialog', ref: dialog, role: 'dialog', 'aria-modal': true, 'aria-label': '工作区配置', tabIndex: -1},
-      h('div', {className: 'ds-ssh-row ds-ssh-dialog-header'}, h('div', null, h('span', {className: 'ds-ssh-kicker'}, remote ? 'SSH 远程工作区' : '工作区'), h('h2', null, '工作区配置')), h(Button, {'aria-label': '关闭工作区配置', onClick: dismiss}, '×')),
+      h('div', {className: 'ds-ssh-row ds-ssh-dialog-header'}, h('div', null, h('span', {className: 'ds-ssh-kicker'}, remote ? 'SSH 远程工作区' : '工作区'), h('h2', null, '工作区配置')), h(Button, {'aria-label': '关闭工作区配置', className: 'ds-ssh-icon-btn', onClick: dismiss}, '×')),
       h('p', {className: 'ds-ssh-muted'}, '修改当前工作区的配置，保留已有对话与工作区关联。'),
+      h('div', {ref: noticeRef},
+        saved && h('div', {className: 'ds-ssh-notice', role: 'status'}, '工作区配置已保存，已有对话已保留。重新打开文件面板可查看更新后的目录。'),
+        h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value))})),
       workspace && h('div', {className: 'ds-ssh-stack'},
         h(Field, {label: '工作区名称', value: title, maxLength: 120, disabled: op.busy, onChange: event => { setTitle(event.target.value); setSaved(false); }}),
         remote ? h(React.Fragment, null,
@@ -350,9 +357,7 @@ function WorkspaceConfigurationDialog({ctx, request, close}) {
             return value;
           })}, '保存配置'),
           h(Button, {disabled: op.busy, onClick: () => op.run(load)}, '重新加载'),
-          h(Button, {disabled: op.busy, onClick: dismiss}, '完成'))),
-      saved && h('div', {className: 'ds-ssh-notice', role: 'status'}, '工作区配置已保存，已有对话已保留。重新打开文件面板可查看更新后的目录。'),
-      h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value))})));
+          h(Button, {disabled: op.busy, onClick: dismiss}, '完成')))));
 }
 function ConversationSshDock({sessionId, requests}) {
   const [status, setStatus] = useState(null), [hosts, setHosts] = useState([]), [selectedAlias, setSelectedAlias] = useState(''), [dismissed, setDismissed] = useState(false);
@@ -441,7 +446,7 @@ function ConversationSshDock({sessionId, requests}) {
       h('span', {className: 'ds-ssh-dock-title'}, auth ? 'SSH 需认证' : op.busy ? 'SSH 连接中' : op.error ? 'SSH 连接失败' : 'SSH 未连接'),
       hosts.length > 1
         ? h('select', {className: 'ds-ssh-dock-select', 'aria-label': 'SSH 连接主机', value: targetAlias, disabled: op.busy, onChange: e => { op.clearError(); setSelectedAlias(e.target.value); }},
-            hosts.map(item => h('option', {key: item.alias, value: item.alias}, `${item.alias} (${item.hostname}:${item.port})`)))
+            hosts.map(item => h('option', {key: item.alias, value: item.alias}, `${item.alias} (${item.hostname})`)))
         : h('span', {className: 'ds-ssh-dock-host'}, status.alias),
       h('span', {className: 'ds-ssh-muted ds-ssh-dock-path', title: status.remoteRoot}, status.remoteRoot),
       h('div', {className: 'ds-ssh-dock-actions'},

@@ -26,7 +26,8 @@
 .ds-ssh-dock .ds-ssh-button:hover:enabled{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit)}
 .ds-ssh-dock .ds-ssh-primary{background:var(--dsw-alias-button-info-fill,#4169e1);color:var(--dsw-alias-label-on-color,#fff);border-color:transparent}
 .ds-ssh-dock .ds-ssh-primary:hover:enabled{background:var(--dsw-alias-button-info-hover,#365bc7);color:var(--dsw-alias-label-on-color,#fff)}
-.ds-ssh-dock .ds-ssh-icon-btn{min-width:26px;padding:0 6px;border-color:transparent;color:var(--dsw-alias-label-tertiary,inherit)}
+.ds-ssh-dock .ds-ssh-icon-btn{min-width:26px;width:26px;height:26px;min-height:26px;padding:0;border:none;border-radius:999px;background:transparent;color:var(--dsw-alias-label-tertiary,inherit);font-size:15px;line-height:1}
+.ds-ssh-dock .ds-ssh-icon-btn:hover:enabled{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));color:var(--dsw-alias-label-primary,inherit)}
 .ds-ssh-dock-body{margin-top:6px;padding-top:6px;border-top:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.14))}
 .ds-ssh-dock .ds-ssh-trust,.ds-ssh-dock .ds-ssh-notice,.ds-ssh-dock .ds-ssh-error{margin:0;padding:8px 10px;border-radius:var(--dsw-radius-sm,8px);font-size:12px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.18))}
 .ds-ssh-dock .ds-ssh-error{background:rgba(220,60,70,.08);border-color:rgba(220,60,70,.24);color:var(--dsw-alias-state-error-primary,#e05260)}
