@@ -69,6 +69,7 @@ function useOperation() {
   };
   return {busy, error, result, challenge, challengeBusy, run,
     cancel: () => controller.current?.abort(),
+    clearError: () => { if (alive.current) setError(null); },
     clearCredentials: () => { credentials.current = {}; },
     replyChallenge: async answers => {
       if (!challenge || challengeBusy) return;
@@ -354,11 +355,11 @@ function WorkspaceConfigurationDialog({ctx, request, close}) {
       h(Notice, {op, onCredentials: value => setSecrets(old => mergeSecrets(old, value))})));
 }
 function ConversationSshDock({sessionId, requests}) {
-  const [status, setStatus] = useState(null), [dismissed, setDismissed] = useState(false);
+  const [status, setStatus] = useState(null), [hosts, setHosts] = useState([]), [selectedAlias, setSelectedAlias] = useState(''), [dismissed, setDismissed] = useState(false);
   const op = useOperation();
   const startedAuthRef = useRef(null), aliasRef = useRef('');
   useEffect(() => {
-    setDismissed(false); startedAuthRef.current = null;
+    setDismissed(false); startedAuthRef.current = null; setSelectedAlias('');
     if (!sessionId) { setStatus(null); return; }
     let closed = false, timer;
     const controller = new AbortController();
@@ -368,6 +369,10 @@ function ConversationSshDock({sessionId, requests}) {
         if (closed) return;
         setStatus(next);
         if (!next?.ssh) return;
+        setSelectedAlias(old => old || next.alias);
+        if (!hosts.length) {
+          api({action: 'hosts-status'}, controller.signal).then(data => { if (!closed && data?.hosts) setHosts(data.hosts); }).catch(() => {});
+        }
         timer = setTimeout(poll, next.state === 'connected' && !next.auth ? 3500 : 1200);
       } catch {
         if (!closed) timer = setTimeout(poll, 3000);
@@ -376,6 +381,9 @@ function ConversationSshDock({sessionId, requests}) {
     poll();
     return () => { closed = true; controller.abort(); clearTimeout(timer); };
   }, [sessionId]);
+  useEffect(() => {
+    if (status?.alias && (!selectedAlias || status.state === 'connected')) setSelectedAlias(status.alias);
+  }, [status?.alias, status?.state]);
   useEffect(() => {
     const alias = status?.ssh ? status.alias : '';
     aliasRef.current = alias;
@@ -395,13 +403,29 @@ function ConversationSshDock({sessionId, requests}) {
   }, [status?.auth?.id]);
   if (!status?.ssh) return null;
   const auth = status.auth;
-  const showInteractive = !!auth || op.busy || !!op.error || !!op.challenge;
-  if (!showInteractive && (status.state === 'connected' || dismissed)) return null;
+  const targetAlias = selectedAlias || status.alias;
+  const switchingHost = targetAlias && targetAlias !== status.alias;
+  const showDetail = !!op.challenge || !!op.error || (op.busy && !op.result) || !!auth;
+  if (!showDetail && !switchingHost && (status.state === 'connected' || dismissed)) return null;
   const openWorkspaceConfig = () => requests.set({workspaceId: status.workspaceId});
   const startConnect = () => {
     setDismissed(false);
     op.run(async (signal, secrets, onChallenge) => {
-      await action({action: 'connect', alias: status.alias, secrets}, signal, onChallenge);
+      if (switchingHost) {
+        if (auth) await api({action: 'auth-cancel', id: auth.id}, signal).catch(() => {});
+        const cfg = await api({action: 'workspace-config', workspaceId: status.workspaceId}, signal);
+        await action({
+          action: 'update-workspace',
+          workspaceId: status.workspaceId,
+          revision: cfg.revision,
+          title: cfg.title || status.title || `SSH · ${targetAlias}`,
+          path: cfg.path,
+          alias: targetAlias,
+          secrets
+        }, signal, onChallenge);
+      } else {
+        await action({action: 'connect', alias: status.alias, secrets}, signal, onChallenge);
+      }
       setStatus(await api({action: 'session-ssh-state', sessionId}, signal));
     });
   };
@@ -410,17 +434,23 @@ function ConversationSshDock({sessionId, requests}) {
     if (auth) api({action: 'auth-cancel', id: auth.id}).catch(() => {});
     else setDismissed(true);
   };
-  return h('div', {className: `ds-ssh-dock${showInteractive ? '' : ' ds-ssh-dock-idle'}`, role: 'region', 'aria-label': 'SSH 连接提示'},
+  const dotClass = op.error ? 'ds-ssh-dot ds-ssh-dot-err' : op.busy ? 'ds-ssh-dot ds-ssh-dot-busy' : 'ds-ssh-dot';
+  return h('div', {className: 'ds-ssh-dock', role: 'region', 'aria-label': 'SSH 连接提示'},
     h('div', {className: 'ds-ssh-dock-bar'},
-      h('span', {className: 'ds-ssh-pill'}, auth ? `需要 SSH 登录 · ${status.alias}` : op.busy ? `正在连接 · ${status.alias}` : `SSH 未连接 · ${status.alias}`),
-      h('span', {className: 'ds-ssh-muted ds-ssh-dock-path'}, status.remoteRoot),
+      h('span', {className: dotClass, 'aria-hidden': true}),
+      h('span', {className: 'ds-ssh-dock-title'}, auth ? 'SSH 需认证' : op.busy ? 'SSH 连接中' : op.error ? 'SSH 连接失败' : 'SSH 未连接'),
+      hosts.length > 1
+        ? h('select', {className: 'ds-ssh-dock-select', 'aria-label': 'SSH 连接主机', value: targetAlias, disabled: op.busy, onChange: e => { op.clearError(); setSelectedAlias(e.target.value); }},
+            hosts.map(item => h('option', {key: item.alias, value: item.alias}, `${item.alias} (${item.hostname}:${item.port})`)))
+        : h('span', {className: 'ds-ssh-dock-host'}, status.alias),
+      h('span', {className: 'ds-ssh-muted ds-ssh-dock-path', title: status.remoteRoot}, status.remoteRoot),
       h('div', {className: 'ds-ssh-dock-actions'},
-        !showInteractive && h(Button, {primary: true, onClick: startConnect}, '立即登录'),
-        h(Button, {disabled: op.busy && !op.challenge, onClick: openWorkspaceConfig}, '工作区配置'),
-        showInteractive
+        (!op.busy || op.error) && h(Button, {primary: true, onClick: startConnect}, switchingHost ? '切换并登录' : op.error ? '重试' : '立即登录'),
+        h(Button, {disabled: op.busy && !op.challenge && !op.error, onClick: openWorkspaceConfig}, '工作区配置'),
+        op.busy || auth
           ? h(Button, {onClick: cancelConnect}, '取消')
-          : h(Button, {'aria-label': '收起 SSH 提示', onClick: () => setDismissed(true)}, '×'))),
-    showInteractive && h(Notice, {op}));
+          : h(Button, {'aria-label': '收起 SSH 提示', className: 'ds-ssh-icon-btn', onClick: () => setDismissed(true)}, '×'))),
+    showDetail && h('div', {className: 'ds-ssh-dock-body'}, h(Notice, {op})));
 }
 function apply(ctx) {
   const requests = {current: null, listeners: new Set(), set(value) { this.current = value; for (const listener of this.listeners) listener(value); }};

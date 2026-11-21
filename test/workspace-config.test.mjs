@@ -107,6 +107,13 @@ test('all public activity families block target edits while offline title edits 
   const titleOnly = await f.manager.updateWorkspace(await inputFor(f, {title: 'Title during activity'}));
   assert.equal(titleOnly.title, 'Title during activity'); assert.equal(f.record.remoteRoot, '/original');
 });
+test('same-path host switch is allowed when only a background schedule exists, while active turns or path changes still block', async t => {
+  const f = await fixture(t);
+  f.ctx.waterfall = async () => [{kind: 'schedule', items: ['cron-1']}];
+  const switched = await f.manager.updateWorkspace(await inputFor(f, {alias: 'next', path: '/original', title: 'Switched'}));
+  assert.equal(switched.alias, 'next'); assert.equal(switched.path, '/original');
+  await assert.rejects(() => f.manager.updateWorkspace({...switched, path: '/changed'}), {code: 'WORKSPACE_ACTIVE'});
+});
 
 test('activity appearing during browse and retained terminals block retargeting', async t => {
   const f = await fixture(t), browse = f.manager.mounts.browse; let active = false;
