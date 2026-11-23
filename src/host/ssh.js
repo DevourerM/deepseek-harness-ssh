@@ -355,7 +355,7 @@ export class SshConnector {
             },
             tryKeyboard: true, agentForward: false, authHandler,
             readyTimeout: onChallenge ? Math.max(item.timeout, 120000) : item.timeout,
-            keepaliveInterval: item.keepalive, keepaliveCountMax: 3,
+            keepaliveInterval: item.keepalive, keepaliveCountMax: 6,
             hostVerifier: key => {
               const fingerprint = fingerprintOf(key);
               if (known[endpoint] === fingerprint) return true;

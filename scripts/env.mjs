@@ -2,11 +2,12 @@ import {existsSync, readFileSync} from 'node:fs';
 import {resolve, join} from 'node:path';
 export const root = resolve(import.meta.dirname, '..');
 export const artifacts = join(root, 'artifacts');
-export const supportedRuntime = '0.2.2-rc.5';
+export const supportedRuntime = '0.2.3-alpha.2';
 export function runtimePath() {
   const runtime = [
     process.env.DSH_DEV_RUNTIME,
     resolve(root, `../tree-chat/research/compat-${supportedRuntime}/dsh/node_modules`),
+    resolve(root, '../tree-chat/research/compat-0.2.2-rc.5/dsh/node_modules'),
     resolve(root, '../tree-chat/research/compat-0.2.2-rc.3/dsh/node_modules'),
     resolve(root, '../tree-chat/research/compat-0.2.2-rc.2/dsh/node_modules'),
     resolve(root, '../tree-chat/research/compat-0.2.2-rc.1/dsh/node_modules'),

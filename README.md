@@ -55,6 +55,10 @@
 
 南大 `entry.nju.edu.cn` 一类 `TERM-SSHD` 网关，会在 SSH 密码通过后于终端中提示动态口令。插件在该终端内完成验证，之后通过同一 SSH 通道访问文件和启动进程（远端需有 Python 3），不单独开启 SFTP 或 SSH exec 通道。已有直连和入口别名可在工作区配置中切换，保留工作区和会话关联。
 
+同一 DSH 主机内，使用相同 SSH 别名的对话复用已有连接。切换对话不取消后台登录；只有显式取消或登录超时才结束该尝试。服务器实际断开或 DSH 主机重启后仍需重新认证。
+
+终端网关通过动态口令和 Python 握手后即可连接、浏览工作区目录和运行命令。文件面板的读写模块在首次文件请求时加载，同一连接只加载一次。
+
 配置位于 `%USERPROFILE%\.dsh\plugins\deepseek-harness-ssh\config`，或 `$DSH_HOME/plugins/deepseek-harness-ssh/config`。配置与主机指纹库独立于 VS Code 和 OpenSSH 配置。可以引用已有私钥；不会转发 SSH Agent。支持上述指令、`IdentityAgent none`、引号、注释、`Key=Value` 与 `Host *` 默认值。出于兼容性仍接受旧的 `NodePath` 字段，当前版本不使用它。拒绝 Include、ProxyCommand 和任意本地命令。
 
 ## 使用远程文件夹
@@ -100,7 +104,7 @@ npm run pack:plugin
 npm run test:install
 ```
 
-通过 `DSH_DEV_RUNTIME` 指定宿主测试所用的 `node_modules`。未设置时优先使用 `../tree-chat/research/compat-0.2.2-rc.5/dsh/node_modules`，并回退到已安装的旧版测试运行时。集成脚本会把实际读到的宿主版本写入 `artifacts/*-result.json`。UI 测试需要 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。`npm run test:install` 在隔离 `DSH_HOME`（位于系统临时目录，避免 Node 包自引用）中通过真实插件界面安装并立即启用 tgz，校验宿主插件 API 真实可用后再打开 SSH 设置页。`npm run test:remote` 读取本机忽略的 `artifacts/real-server/config` 与独立主机指纹，在服务器专用验证目录运行本地模拟模型及真实 SSH 文件测试，不请求外部模型。
+通过 `DSH_DEV_RUNTIME` 指定宿主测试所用的 `node_modules`。未设置时优先使用 `../tree-chat/research/compat-0.2.3-alpha.2/dsh/node_modules`，并回退到已安装的旧版测试运行时。集成脚本会把实际读到的宿主版本写入 `artifacts/*-result.json`。UI 测试需要 `SSH_PLAYWRIGHT` 指向 Playwright 的 `index.mjs`，可选 `SSH_CHROMIUM`。`npm run test:install` 在隔离 `DSH_HOME`（位于系统临时目录，避免 Node 包自引用）中通过真实插件界面安装并立即启用 tgz，校验宿主插件 API 真实可用后再打开 SSH 设置页。`npm run test:remote` 读取本机忽略的 `artifacts/real-server/config` 与独立主机指纹，在服务器专用验证目录运行本地模拟模型及真实 SSH 文件测试，不请求外部模型。
 
 远程文件页支持 UTF-8 文本编辑（保留 BOM 和 CRLF），超过 5 MiB 的文本分页只读；上传与保存上限 8 MiB，单次媒体读取/下载上限 16 MiB。非 UTF-8 文件不会按 UTF-8 覆写。文件页受当前会话权限及远端工作区路径边界约束。
 

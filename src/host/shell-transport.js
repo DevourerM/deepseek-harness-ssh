@@ -10,7 +10,7 @@ import {isOtpPrompt, isPasswordPrompt} from './auth-prompts.js';
 
 const RPC_PREFIX = '__DSH_RPC__:';
 const RPC_CHUNK = '__DSH_CHUNK__:';
-const RPC_FINAL = '__DSH_FINAL__';
+const RPC_FINAL = '__DSH_FINAL__:';
 const transports = new WeakMap();
 const stageLabels = {
   ping: '远端 Python 握手',
@@ -165,7 +165,8 @@ class ShellTransport {
   pending = new Map();
   processes = new Map();
   seq = 0;
-  fileLoaded = false;
+  fileReady;
+  python;
   closed = false;
   sendQueue = Promise.resolve();
 
@@ -180,7 +181,7 @@ class ShellTransport {
   }
 
   async start(options) {
-    const {signal, ptyFirst, onClose} = options;
+    const {signal, ptyFirst, onClose, host} = options;
     const source = await readFile(new URL('./shell-worker.py', import.meta.url), 'utf8');
     this.stream = ptyFirst
       ? await openInteractiveShell(this.client, options)
@@ -191,6 +192,7 @@ class ShellTransport {
         });
     let buffer = Buffer.alloc(0);
     this.stream.on('data', chunk => {
+      this.lastActivity = Date.now();
       buffer = Buffer.concat([buffer, chunk]);
       let idx;
       while ((idx = buffer.indexOf(10)) >= 0) {
@@ -201,9 +203,11 @@ class ShellTransport {
         try { this.onMessage(JSON.parse(line.slice(pos + RPC_PREFIX.length))); } catch {}
       }
     });
+    this.lastActivity = Date.now();
     const failAll = err => {
       if (this.closed) return;
       this.closed = true;
+      clearInterval(this.heartbeat);
       for (const item of this.pending.values()) { clearTimeout(item.timer); item.reject(err); }
       this.pending.clear();
       for (const proc of this.processes.values()) proc.finish(null, 'SIGKILL');
@@ -222,7 +226,7 @@ class ShellTransport {
     const loader = 'import sys,base64,zlib;print("__DSH_LOADER_READY__",flush=True);parts=[];exec(' +
       JSON.stringify(loadParts) + ');exec(zlib.decompress(base64.b64decode("".join(parts))))';
     const lines = deflateSync(source).toString('base64').match(/.{1,384}/g);
-    this.waitForLine = (expected, stage, control = signal) => new Promise((resolve, reject) => {
+    this.waitForLine = (expected, stage, control) => new Promise((resolve, reject) => {
       let pending = '';
       const finish = error => {
         clearTimeout(timer);
@@ -245,21 +249,26 @@ class ShellTransport {
       control?.addEventListener('abort', abort, {once: true});
       if (control?.aborted) abort();
     });
-    const loaderReady = this.waitForLine('__DSH_LOADER_READY__', '启动远端 Python');
+    const loaderReady = this.waitForLine('__DSH_LOADER_READY__', '启动远端 Python', signal);
     this.stream.write("python3 -u -c '" + loader + "'; exit\n");
     await loaderReady;
     for (const [index, line] of lines.entries()) {
-      const receipt = this.waitForLine('__DSH_PART_OK__', '传输远端 Python 工作进程 (' + (index + 1) + '/' + lines.length + ')');
+      const receipt = this.waitForLine('__DSH_PART_OK__', '传输远端 Python 工作进程 (' + (index + 1) + '/' + lines.length + ')', signal);
       this.stream.write(line + '\n');
       await receipt;
     }
-    const workerReady = this.waitForLine('__DSH_WORKER_READY__', '加载远端 Python 工作进程');
+    const workerReady = this.waitForLine('__DSH_WORKER_READY__', '加载远端 Python 工作进程', signal);
     this.stream.write('__DSH_EOF__\n');
     await workerReady;
-    await this.rpc('ping', {}, {signal, timeout: 15000, skipReady: true});
-    const fileSource = await readFile(new URL('./file-worker.py', import.meta.url), 'utf8');
-    await this.rpc('init_file', {source: deflateSync(fileSource).toString('base64'), compressed: true}, {signal, timeout: 60000, skipReady: true});
-    this.fileLoaded = true;
+    const {python} = await this.rpc('ping', {}, {signal, timeout: 15000, skipReady: true});
+    this.python = python;
+    if (ptyFirst && !this.closed) {
+      const interval = Math.max(10000, host?.keepalive || 15000);
+      this.heartbeat = setInterval(() => {
+        if (!this.closed && !this.pending.size && Date.now() - this.lastActivity >= interval) this.ping().catch(() => {});
+      }, interval);
+      this.heartbeat.unref();
+    }
   }
 
   send(request, signal) {
@@ -267,14 +276,25 @@ class ShellTransport {
       signal?.throwIfAborted();
       if (this.closed) throw new SshError('SSH Shell 连接已关闭', 'SSH_CLOSED');
       const write = text => new Promise((resolve, reject) => this.stream.write(text + '\n', error => error ? reject(error) : resolve()));
-      const json = JSON.stringify(request);
-      if (Buffer.byteLength(json) <= 384) { await write(json); return; }
-      const chunks = Buffer.from(json).toString('base64').match(/.{1,384}/g);
-      for (const chunk of chunks) {
-        const receipt = this.waitForLine('__DSH_RPC_PART_OK__', (stageLabels[request.op] || '远端操作') + '传输');
-        await Promise.all([write(RPC_CHUNK + chunk), receipt]);
+      const json = Buffer.from(JSON.stringify(request));
+      if (json.length <= 384) { await write(json.toString()); return; }
+      const compressed = deflateSync(json);
+      const useCompression = compressed.length < json.length;
+      const frames = (useCompression ? compressed : json).toString('base64').match(/.{1,384}/g);
+      if (json.length >= 48 * 1024 * 1024 || frames.length * 384 > 48 * 1024 * 1024) {
+        throw new SshError('远端请求数据过大', 'OUTPUT_LIMIT');
       }
-      await write(RPC_FINAL);
+      const final = frames.pop();
+      try {
+        for (const frame of frames) {
+          const receipt = this.waitForLine('__DSH_RPC_PART_OK__', (stageLabels[request.op] || '远端操作') + '传输');
+          await Promise.all([write(RPC_CHUNK + frame), receipt]);
+        }
+        await write(RPC_FINAL + (useCompression ? 'z:' : 'b:') + final);
+      } catch (error) {
+        this.stream.destroy();
+        throw error;
+      }
     });
     this.sendQueue = result.catch(() => {});
     return result;
@@ -302,26 +322,34 @@ class ShellTransport {
     if (this.closed) throw new SshError('SSH Shell 连接已关闭', 'SSH_CLOSED');
     signal?.throwIfAborted();
     const id = ++this.seq;
-    const deferred = Promise.withResolvers();
+    const deferred = Promise.withResolvers(), queued = new AbortController();
     const onAbort = () => {
       this.pending.delete(id);
       clearTimeout(timer);
+      queued.abort(signal.reason);
       deferred.reject(signal.reason || new SshError('操作已取消', 'CANCELLED'));
     };
-    const timer = setTimeout(() => {
+    const onTimeout = () => {
       this.pending.delete(id);
       signal?.removeEventListener('abort', onAbort);
-      deferred.reject(new SshError((stageLabels[op] || '远端操作') + '超时', 'REMOTE_TIMEOUT', {stage: op}));
-    }, timeout);
+      const error = new SshError((stageLabels[op] || '远端操作') + '超时', 'REMOTE_TIMEOUT', {stage: op});
+      queued.abort(error);
+      deferred.reject(error);
+    };
+    let timer = setTimeout(onTimeout, timeout);
     signal?.addEventListener('abort', onAbort, {once: true});
-    this.pending.set(id, {
+    const item = {
       resolve: v => { signal?.removeEventListener('abort', onAbort); deferred.resolve(v); },
       reject: e => { signal?.removeEventListener('abort', onAbort); deferred.reject(e); },
       timer
-    });
-    this.send({id, op, ...payload}, signal).catch(error => {
-      const item = this.pending.get(id);
-      if (!item) return;
+    };
+    this.pending.set(id, item);
+    this.send({id, op, ...payload}, queued.signal).then(() => {
+      if (this.pending.get(id) !== item) return;
+      clearTimeout(timer);
+      item.timer = timer = setTimeout(onTimeout, timeout);
+    }, error => {
+      if (this.pending.get(id) !== item) return;
       this.pending.delete(id);
       clearTimeout(item.timer);
       item.reject(error);
@@ -330,8 +358,31 @@ class ShellTransport {
   }
 
   ping(signal) { return this.rpc('ping', {}, {signal, timeout: 15000}); }
+  async pythonVersion(signal) {
+    signal?.throwIfAborted();
+    await this.readyPromise;
+    signal?.throwIfAborted();
+    if (this.closed) throw new SshError('SSH Shell 连接已关闭', 'SSH_CLOSED');
+    return this.python;
+  }
   browse(path, signal) { return this.rpc('browse', {path}, {signal, timeout: 15000}); }
+  async ensureFileService(signal) {
+    signal?.throwIfAborted();
+    if (!this.fileReady) {
+      this.fileReady = readFile(new URL('./file-worker.py', import.meta.url), 'utf8')
+        .then(source => this.rpc('init_file', {source}))
+        .catch(error => { this.fileReady = undefined; throw error; });
+    }
+    if (!signal) return this.fileReady;
+    await new Promise((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, {once: true});
+      this.fileReady.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+      if (signal.aborted) abort();
+    });
+  }
   async fileRequest(query, signal) {
+    await this.ensureFileService(signal);
     const data = await this.rpc('file', {query}, {signal, timeout: 60000});
     if (!data.ok) { const error = new Error(data.message); error.code = data.code; throw error; }
     return data.value;
@@ -345,9 +396,16 @@ class ShellTransport {
     // Override id in rpc so worker registers proc under targetId.
     const id = targetId;
     const deferred = Promise.withResolvers();
-    const timer = setTimeout(() => { this.pending.delete(id); this.processes.delete(targetId); deferred.reject(new SshError('远程进程启动超时', 'REMOTE_TIMEOUT')); }, 20000);
-    this.pending.set(id, {resolve: deferred.resolve, reject: e => { this.processes.delete(targetId); deferred.reject(e); }, timer});
-    this.send({id, op: 'exec_start', spec}, signal).catch(error => {
+    const queued = AbortSignal.timeout(60000);
+    const admission = signal ? AbortSignal.any([signal, queued]) : queued;
+    const onTimeout = () => { this.pending.delete(id); this.processes.delete(targetId); deferred.reject(new SshError('远程进程启动超时', 'REMOTE_TIMEOUT')); };
+    const pending = {resolve: deferred.resolve, reject: e => { this.processes.delete(targetId); deferred.reject(e); }, timer: setTimeout(onTimeout, 60000)};
+    this.pending.set(id, pending);
+    this.send({id, op: 'exec_start', spec}, admission).then(() => {
+      if (this.pending.get(id) !== pending) return;
+      clearTimeout(pending.timer);
+      pending.timer = setTimeout(onTimeout, 20000);
+    }, error => {
       const item = this.pending.get(id);
       if (!item) return;
       this.pending.delete(id);

@@ -16,14 +16,19 @@ function pause(ms, signal) {
     signal?.addEventListener('abort', abort, {once: true}); if (signal?.aborted) abort();
   });
 }
-async function action(input, signal, onChallenge) {
-  const {jobId} = await api(input, signal);
+async function action(input, signal, onChallenge, retainJob) {
+  const {jobId} = input.jobId ? input : await api(input, retainJob ? undefined : signal);
+  retainJob?.(jobId);
+  return followJob(jobId, signal, onChallenge, !!retainJob);
+}
+async function followJob(jobId, signal, onChallenge, detached) {
   let lastChallengeId = null;
   try {
     while (true) {
       const job = await api({action: 'poll', jobId}, signal);
       if (job.done) {
         onChallenge?.(null);
+        if (job.error?.code === 'CANCELLED') throw new DOMException('操作已取消', 'AbortError');
         if (job.error) throw Object.assign(new Error(job.error.message), job.error);
         return job.result;
       }
@@ -43,14 +48,14 @@ async function action(input, signal, onChallenge) {
     }
   } catch (e) {
     onChallenge?.(null);
-    if (signal?.aborted) api({action: 'cancel', jobId}).catch(() => {});
+    if (signal?.aborted && !detached) api({action: 'cancel', jobId}).catch(() => {});
     throw e;
   }
 }
 function useOperation() {
   const [busy, setBusy] = useState(false), [error, setError] = useState(null), [result, setResult] = useState(null);
   const [challenge, setChallenge] = useState(null), [challengeBusy, setChallengeBusy] = useState(false);
-  const controller = useRef(null), retry = useRef(null), alive = useRef(true), currentChallenge = useRef(null);
+  const controller = useRef(null), retry = useRef(null), alive = useRef(true), currentChallenge = useRef(null), job = useRef(null);
   useEffect(() => { alive.current = true; return () => { alive.current = false; controller.current?.abort(); }; }, []);
   const onChallenge = value => {
     currentChallenge.current = value;
@@ -59,13 +64,26 @@ function useOperation() {
   const run = async (fn, remember = true) => {
     if (controller.current) return;
     const c = new AbortController(); controller.current = c; if (remember) retry.current = fn;
+    const tracking = {id: null, cancelled: false}; job.current = tracking;
     setBusy(true); setError(null); onChallenge(null);
-    try { const value = await fn(c.signal, undefined, onChallenge); if (alive.current) setResult(value); return value; }
+    try {
+      const value = await fn(c.signal, undefined, onChallenge, id => {
+        tracking.id = id;
+        if (tracking.cancelled) api({action: 'cancel', jobId: id}).catch(() => {});
+      });
+      if (alive.current) setResult(value); return value;
+    }
     catch (e) { if (alive.current && e.name !== 'AbortError') setError(e); }
     finally { controller.current = null; onChallenge(null); if (alive.current) setBusy(false); }
   };
   return {busy, error, result, challenge, challengeBusy, canRetry: !!retry.current, run,
-    cancel: () => controller.current?.abort(),
+    cancel: () => {
+      if (controller.current && job.current) {
+        job.current.cancelled = true;
+        if (job.current.id) api({action: 'cancel', jobId: job.current.id}).catch(() => {});
+      }
+      controller.current?.abort();
+    },
     clearError: () => { if (alive.current) setError(null); },
     replyChallenge: async answers => {
       if (!challenge || challengeBusy) return;
@@ -81,7 +99,7 @@ function useOperation() {
       }
     },
     retryFresh: () => retry.current ? run(retry.current, false) : undefined,
-    trust: () => { const fn = retry.current; return run(async (signal, extra, cb) => { await api({action: 'trust', challengeId: error.details.challengeId}, signal); return fn(signal, extra, cb); }, false); }};
+    trust: () => { const fn = retry.current; return run(async (signal, extra, cb, retainJob) => { await api({action: 'trust', challengeId: error.details.challengeId}, signal); return fn(signal, extra, cb, retainJob); }, false); }};
 }
 function Icon({kind, size = 22}) {
   const paths = {folder: ['M3 7h6l2-3h10v16H3z'], server: ['M4 3h16v7H4z','M4 14h16v7H4z','M7 6.5h.01','M7 17.5h.01','M11 6.5h6','M11 17.5h6'], arrow: ['m9 5 7 7-7 7'], check: ['m5 12 4 4L19 6']};
@@ -218,10 +236,14 @@ function WorkspaceFlow(props) {
 }
 function AuthenticationRequest({pending}) {
   const op = useOperation();
-  useEffect(() => { op.run((signal, secrets, onChallenge) => action({action: 'connect', alias: pending.alias, secrets}, signal, onChallenge)); }, [pending.id]);
+  useEffect(() => { op.run((signal, secrets, onChallenge, retainJob) => action({action: 'connect', alias: pending.alias, secrets, background: true}, signal, onChallenge, retainJob)); }, [pending.id]);
+  const cancel = () => {
+    op.cancel();
+    api({action: 'auth-cancel', id: pending.id}).catch(() => {});
+  };
   return h('div', {className: 'ds-ssh-backdrop'}, h('div', {className: 'ds-ssh-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': '重新连接 SSH'},
-    h('h2', null, '重新连接 SSH · ' + pending.alias), h(Notice, {op}),
-    h(Button, {onClick: () => { op.cancel(); api({action: 'auth-cancel', id: pending.id}).catch(() => {}); }}, '取消连接')));
+    h('h2', null, '重新连接 SSH · ' + pending.alias), h(Notice, {op, cancel}),
+    h(Button, {onClick: cancel}, '取消连接')));
 }
 function ConnectionAuthentication() {
   const [pending, setPending] = useState(null);
@@ -272,8 +294,8 @@ function WorkspaceConfigurationDialog({request, close}) {
     const value = await action({action: 'browse', alias, path: target}, signal, onChallenge);
     setPath(value.path); setListing(value); setConnected(old => [...new Set([...old, alias])]);
   });
-  const saveWorkspace = () => op.run(async (signal, _extra, onChallenge) => {
-    if (connect) await action({action: 'connect', alias}, signal, onChallenge);
+  const saveWorkspace = () => op.run(async (signal, _extra, onChallenge, retainJob) => {
+    if (connect) await action({action: 'connect', alias}, signal, onChallenge, retainJob);
     if (changed) await action({action: 'update-workspace', workspaceId: workspace.workspaceId,
       revision: workspace.revision, title, path, ...(remote ? {alias} : {})}, signal, onChallenge);
     close();
@@ -315,9 +337,12 @@ function WorkspaceConfigurationDialog({request, close}) {
         connect ? changed ? '连接并保存' : '连接' : '保存'))));
 }
 function ConversationSshDock({sessionId}) {
+  return h(ConversationSshStatus, {key: sessionId, sessionId});
+}
+function ConversationSshStatus({sessionId}) {
   const [status, setStatus] = useState(null), [hosts, setHosts] = useState([]), [selectedAlias, setSelectedAlias] = useState(''), [dismissed, setDismissed] = useState(false);
   const op = useOperation();
-  const startedAuthRef = useRef(null), aliasRef = useRef('');
+  const startedAuthRef = useRef(null), followedJob = useRef(null);
   useEffect(() => {
     setDismissed(false); startedAuthRef.current = null; setSelectedAlias('');
     if (!sessionId) { setStatus(null); return; }
@@ -347,7 +372,6 @@ function ConversationSshDock({sessionId}) {
   }, [status?.alias, status?.state]);
   useEffect(() => {
     const alias = status?.ssh ? status.alias : '';
-    aliasRef.current = alias;
     if (!alias) return;
     activeSessionDocks.set(alias, (activeSessionDocks.get(alias) || 0) + 1);
     return () => {
@@ -356,21 +380,37 @@ function ConversationSshDock({sessionId}) {
     };
   }, [status?.ssh, status?.alias]);
   useEffect(() => {
-    const auth = status?.auth;
-    if (!auth || startedAuthRef.current === auth.id || op.busy) return;
+    const auth = status?.auth, jobId = status?.jobId;
+    if (op.busy || !status?.ssh) return;
+    if (jobId) {
+      if (followedJob.current === jobId) return;
+      followedJob.current = jobId;
+      if (auth) startedAuthRef.current = auth.id;
+      setDismissed(false);
+      op.run(async (signal, _extra, onChallenge, retainJob) => {
+        await action({jobId}, signal, onChallenge, retainJob);
+        const latest = await api({action: 'session-ssh-state', sessionId}, signal);
+        setStatus(latest);
+        setSelectedAlias(latest.alias || '');
+      });
+      return;
+    }
+    if (!auth || startedAuthRef.current === auth.id) return;
     startedAuthRef.current = auth.id;
     setDismissed(false);
-    op.run((signal, secrets, onChallenge) => action({action: 'connect', alias: auth.alias, secrets}, signal, onChallenge));
-  }, [status?.auth?.id]);
+    op.run((signal, secrets, onChallenge, retainJob) => action({action: 'connect', alias: auth.alias, secrets, background: true}, signal, onChallenge,
+      id => { followedJob.current = id; retainJob(id); }));
+  }, [status?.auth?.id, status?.jobId, op.busy]);
   if (!status?.ssh) return null;
   const auth = status.auth;
   const targetAlias = selectedAlias || status.alias;
   const switchingHost = targetAlias && targetAlias !== status.alias;
-  const showDetail = !!op.challenge || !!op.error || (op.busy && !op.result) || !!auth;
+  const showDetail = !!op.challenge || !!op.error;
   if (status.state === 'connected' && !op.busy || dismissed && !op.busy && !auth) return null;
   const startConnect = () => {
     setDismissed(false);
-    op.run(async (signal, secrets, onChallenge) => {
+    op.run(async (signal, secrets, onChallenge, retainJob) => {
+      const track = id => { followedJob.current = id; retainJob(id); };
       if (switchingHost) {
         if (auth) await api({action: 'auth-cancel', id: auth.id}, signal).catch(() => {});
         const cfg = await api({action: 'workspace-config', workspaceId: status.workspaceId}, signal);
@@ -381,10 +421,11 @@ function ConversationSshDock({sessionId}) {
           title: cfg.title || status.title || `SSH · ${targetAlias}`,
           path: cfg.path,
           alias: targetAlias,
+          background: true,
           secrets
-        }, signal, onChallenge);
+        }, signal, onChallenge, track);
       } else {
-        await action({action: 'connect', alias: status.alias, secrets}, signal, onChallenge);
+        await action({action: 'connect', alias: status.alias, secrets, background: true}, signal, onChallenge, track);
       }
       const latest = await api({action: 'session-ssh-state', sessionId}, signal);
       setStatus(latest);

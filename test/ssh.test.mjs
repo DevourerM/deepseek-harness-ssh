@@ -7,11 +7,13 @@ import {createServer} from 'node:http';
 import {createServer as createTcpServer} from 'node:net';
 import {generateKeyPairSync} from 'node:crypto';
 import ssh2 from 'ssh2';
+import {inflateSync} from 'node:zlib';
 import {ConfigStore} from '../src/host/config.js';
 import {LocalManager} from '../src/host/local-manager.js';
 import {RemoteProcesses} from '../src/host/processes.js';
 import {RemoteTerminals} from '../src/host/terminals.js';
 import {SshConnector, browse, exec, forward, nodeCommand} from '../src/host/ssh.js';
+import {getShellTransport} from '../src/host/shell-transport.js';
 import {RemoteManager} from '../src/host/manager.js';
 import {sshFixture, decodeCommand} from './ssh-fixture.mjs';
 
@@ -19,7 +21,11 @@ function readShellRequest(line, chunks, stream) {
   assert.ok(Buffer.byteLength(line) <= 512, 'gateway terminal lines must stay short');
   const prefix = '__DSH_CHUNK__:';
   if (line.startsWith(prefix)) { chunks.push(line.slice(prefix.length)); stream.write('__DSH_RPC_PART_OK__\r\n'); return; }
-  if (line === '__DSH_FINAL__') return JSON.parse(Buffer.from(chunks.splice(0).join(''), 'base64').toString());
+  if (line.startsWith('__DSH_FINAL__:')) {
+    const [, encoding, chunk] = line.split(':');
+    const payload = Buffer.from(chunks.splice(0).join('') + chunk, 'base64');
+    return JSON.parse((encoding === 'z' ? inflateSync(payload) : payload).toString());
+  }
   if (line.startsWith('{')) return JSON.parse(line);
 }
 
@@ -404,13 +410,19 @@ function terminalBastion(onRequest) {
 
 test('TERM-SSHD completes shell OTP, then shares one channel for files, commands and terminals', async t => {
   const operations = [];
+  const fileInit = Promise.withResolvers();
+  let finishFileInit;
   let terminalId;
   const fixture = await setup(t, terminalBastion((request, send) => {
     operations.push(request.op);
     const reply = value => send({id: request.id, ok: true, value});
     const output = (id, value) => send({id, event: 'stdout', data: Buffer.from(value).toString('base64')});
     if (request.op === 'ping') reply({python: '3.12'});
-    if (request.op === 'init_file') { assert.ok(request.source.length > 4096); reply(true); }
+    if (request.op === 'init_file') {
+      assert.match(request.source, /def main/);
+      finishFileInit = () => reply(true);
+      fileInit.resolve();
+    }
     if (request.op === 'browse') reply({path: '/fixture', directories: []});
     if (request.op === 'file') reply({ok: true, value: 'fixture file'});
     if (request.op === 'exec_start') {
@@ -448,12 +460,28 @@ test('TERM-SSHD completes shell OTP, then shares one channel for files, commands
   assert.deepEqual(prompts, ['Password:', '2nd Password:']);
   assert.equal(checked.transport, 'shell');
   assert.equal(checked.python, '3.12');
-  assert.deepEqual(operations.slice(0, 3), ['ping', 'init_file', 'browse']);
+  assert.deepEqual(operations, ['ping', 'browse']);
+  const connection = manager.mounts.connections.get('loopback');
+  const worker = getShellTransport(connection.client);
+  await assert.rejects(worker.rpc('test_no_reply', {}, {timeout: 25}), {code: 'REMOTE_TIMEOUT'});
+  assert.equal(manager.mounts.connections.get('loopback'), connection);
+  assert.equal((await worker.browse('/fixture')).path, '/fixture');
   const record = {id: 'fixture', alias: 'loopback', remoteRoot: '/fixture', localRoot: fixture.root};
   manager.mounts.records.push(record);
-  assert.equal(await manager.mounts.request(record, {action: 'read', path: '/fixture/file'}), 'fixture file');
   const processes = new RemoteProcesses(manager.mounts);
   assert.equal((await processes.execute(record, 'printf command', record.localRoot)).stdout, 'command output');
+  assert.ok(!operations.includes('init_file'));
+  const query = {action: 'read', path: '/fixture/file'};
+  const observer = new AbortController();
+  const first = manager.mounts.request(record, query, observer.signal);
+  const second = manager.mounts.request(record, query);
+  await fileInit.promise;
+  observer.abort();
+  await assert.rejects(first, {name: 'AbortError'});
+  finishFileInit();
+  assert.equal(await second, 'fixture file');
+  assert.equal(await manager.mounts.request(record, query), 'fixture file');
+  assert.equal(operations.filter(op => op === 'init_file').length, 1);
   const terminals = new RemoteTerminals(manager.mounts);
   const terminal = await terminals.spawn(record, {cwd: record.localRoot, argv: ['/bin/bash']});
   await terminal.write('echo test');
@@ -488,6 +516,41 @@ test('TERM-SSHD cancellation at the OTP prompt closes the unfinished connection'
   }}), {name: 'AbortError'});
   assert.equal(manager.mounts.connections.has('loopback'), false);
   assert.equal(manager.ssh.active.size, 0);
+});
+test('host-owned login survives observer cancellation and is shared across sessions and tools', async t => {
+  const fixture = await setup(t, {keyboardOnly: true});
+  await fixture.trust();
+  const cwd = join(fixture.root, 'mounted');
+  const sessions = new Map(['first', 'second'].map(id => [id, {header: {cwd}}]));
+  const manager = new LocalManager(fixture.store, {sessions});
+  t.after(() => manager.dispose());
+  manager.mounts.records.push({id: 'remote', alias: 'loopback', localRoot: cwd, remoteRoot: '/fixture'});
+  const input = {alias: 'loopback'};
+  const {jobId} = manager.job('connect', input);
+  let snapshot;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    snapshot = manager.poll(jobId);
+    if (snapshot.challenge) break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(snapshot.challenge);
+  assert.deepEqual(manager.job('connect', {...input, background: true}), {jobId});
+  assert.equal(manager.jobs.get(jobId).background, true);
+  assert.equal(manager.mounts.sessionStatus('first').state, 'connecting');
+  assert.equal(manager.mounts.sessionStatus('second').state, 'connecting');
+  const observer = new AbortController();
+  const abandoned = manager.mounts.ensure('loopback', observer.signal);
+  const attached = manager.mounts.ensure('loopback');
+  observer.abort();
+  await assert.rejects(abandoned, {name: 'AbortError'});
+  assert.equal(manager.poll(jobId).challenge.id, snapshot.challenge.id);
+  manager.replyChallenge(jobId, snapshot.challenge.id, ['test-password']);
+  const connection = await attached;
+  assert.equal(await manager.mounts.ensure('loopback'), connection);
+  assert.equal(manager.mounts.sessionStatus('first').state, 'connected');
+  assert.equal(manager.mounts.sessionStatus('second').state, 'connected');
+  assert.deepEqual(fixture.server.answers, [['test-password']]);
+  assert.equal(fixture.server.connections.size, 1);
 });
 test('SFTP refusal and silent non-PTY bastion automatically fall back to PTY ShellTransport', {timeout: 15000}, async t => {
   const f = await setup(t, {

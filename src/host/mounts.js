@@ -7,8 +7,18 @@ import {SshConnector, browse, exec, quote} from './ssh.js';
 import {getShellTransport, isExecFallbackError} from './shell-transport.js';
 import {WorkspaceConfig} from './workspace-config.js';
 
+function waitForConnection(attempt, signal) {
+  if (!signal) return attempt;
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, {once: true});
+    attempt.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    if (signal.aborted) abort();
+  });
+}
+
 export class Mounts {
-  records = []; connections = new Map(); connecting = new Map(); authentication = new Map(); recent = []; scope = new AsyncLocalStorage(); disposed = false; tail = Promise.resolve();
+  records = []; connections = new Map(); connecting = new Map(); interactive = new Map(); authentication = new Map(); recent = []; scope = new AsyncLocalStorage(); disposed = false; tail = Promise.resolve();
   constructor(store, ctx = {}) { this.store = store; this.ctx = ctx; this.ssh = new SshConnector(store); }
   touch(record) { if (record?.id) this.recent = [record.id, ...this.recent.filter(id => id !== record.id)]; }
   serial(fn) { const result = this.tail.then(() => { if (this.disposed) throw new SshError('SSH 工作区已停止', 'DISPOSED'); return fn(); }); this.tail = result.catch(() => {}); return result; }
@@ -124,8 +134,21 @@ export class Mounts {
     return {path: normalized, specific, rootMounts, connectedFallback};
   }
   async connect(alias, secrets = {}, signal, options = {}) {
+    signal?.throwIfAborted();
     const previous = this.connections.get(alias); if (previous) return previous;
+    const current = this.interactive.get(alias);
+    if (current) return waitForConnection(current, signal);
+    if (!options.onChallenge) return this.openConnection(alias, secrets, signal, options);
+    const task = this.openConnection(alias, secrets, signal, options).finally(() => {
+      if (this.interactive.get(alias) === task) this.interactive.delete(alias);
+    });
+    this.interactive.set(alias, task);
+    return task;
+  }
+  async openConnection(alias, secrets, signal, options) {
     const connection = await this.ssh.connect(alias, secrets, signal, options);
+    const previous = this.connections.get(alias);
+    if (previous) { connection.close(); return previous; }
     // The lifetime of a successful workspace connection is independent of the
     // settings request that created it; callers cancel individual operations.
     connection.client.once('close', () => { if (this.connections.get(alias) === connection) this.connections.delete(alias); });
@@ -140,6 +163,8 @@ export class Mounts {
     if (!attempt) {
       attempt = this.connect(alias).catch(error => {
         if (!['SSH_AUTH_REQUIRED', 'SSH_AUTH_FAILED', 'SSH_INTERACTIVE_UNSUPPORTED', 'HOST_KEY_UNKNOWN'].includes(error.code)) throw error;
+        if (this.connections.has(alias)) return this.connections.get(alias);
+        if (this.interactive.has(alias)) return this.interactive.get(alias);
         let pending = this.authentication.get(alias);
         if (!pending) {
           const deferred = Promise.withResolvers();
@@ -151,8 +176,7 @@ export class Mounts {
       }).finally(() => this.connecting.delete(alias));
       this.connecting.set(alias, attempt);
     }
-    if (!signal) return attempt;
-    return new Promise((resolve, reject) => { const abort = () => reject(signal.reason); signal.addEventListener('abort', abort, {once: true}); attempt.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort)); if (signal.aborted) abort(); });
+    return waitForConnection(attempt, signal);
   }
   authState() { return [...this.authentication.values()].map(({id, alias, error}) => ({id, alias, error})); }
   sessionStatus(sessionId) {
@@ -167,7 +191,7 @@ export class Mounts {
       title: workspace?.title || record.title || '',
       alias: record.alias,
       remoteRoot: record.remoteRoot,
-      state: this.connections.has(record.alias) ? 'connected' : this.connecting.has(record.alias) ? 'connecting' : 'disconnected',
+      state: this.connections.has(record.alias) ? 'connected' : this.connecting.has(record.alias) || this.interactive.has(record.alias) ? 'connecting' : 'disconnected',
       ...(pending ? {auth: {id: pending.id, alias: pending.alias, error: pending.error}} : {})
     };
   }
@@ -226,7 +250,7 @@ export class Mounts {
     const directory = await this.browseConnected(c, '.', signal);
     let python = '', transport = 'exec';
     if (c.host?.transport === 'shell' || c.useShell) {
-      python = (await getShellTransport(c.client).ping(signal)).python;
+      python = await getShellTransport(c.client).pythonVersion(signal);
       c.useShell = true; transport = 'shell';
     } else {
       try {
@@ -235,7 +259,7 @@ export class Mounts {
         c.execConfirmed = true;
       } catch (error) {
         if (c.host?.transport !== 'auto' || !isExecFallbackError(error)) throw error;
-        python = (await getShellTransport(c.client).ping(signal)).python;
+        python = await getShellTransport(c.client).pythonVersion(signal);
         c.useShell = true; transport = 'shell';
       }
     }

@@ -101,8 +101,7 @@ def handle_line(raw):
     op = req.get('op')
     try:
         if op == 'init_file':
-            source = base64.b64decode(req['source'])
-            exec((zlib.decompress(source) if req.get('compressed') else source).decode('utf-8'), FILE_NS)
+            exec(req['source'], FILE_NS)
             emit(dict(id=rid, ok=True, value=True))
         elif op == 'ping':
             emit(dict(id=rid, ok=True, value=dict(python=sys.version.split()[0])))
@@ -154,9 +153,18 @@ for line in sys.stdin:
         with write_lock:
             print('__DSH_RPC_PART_OK__', flush=True)
         continue
-    if text == '__DSH_FINAL__':
+    if text.startswith('__DSH_FINAL__:'):
         try:
-            text = base64.b64decode(''.join(parts), validate=True).decode('utf-8')
+            encoding, chunk = text[len('__DSH_FINAL__:'):].split(':', 1)
+            payload = base64.b64decode(''.join(parts) + chunk, validate=True)
+            if encoding == 'z':
+                decoder = zlib.decompressobj()
+                payload = decoder.decompress(payload, 48 * 1024 * 1024)
+                if not decoder.eof:
+                    sys.exit(1)
+            elif encoding != 'b':
+                sys.exit(1)
+            text = payload.decode('utf-8')
         except (ValueError, UnicodeError):
             sys.exit(1)
         finally:
