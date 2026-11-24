@@ -51,11 +51,11 @@ export class SidebarAdapter {
     if(!Array.isArray(entries))return entries;
     return entries.map(entry=>({...entry,path:entry?.isSymlink&&shown(entry.path)!==entry.path?shown(entry.path):posix.join(directory,entry.name)}));
   }
-  async handle(req,res,original){
+  async handle(req,res,original,peer){
     const url=new URL(req.url||'/','http://dsh.internal'), pathname=url.pathname;
     const api=pathname.startsWith('/sidebar/api/'), method=api?pathname.slice(13):pathname.slice(9);
-    if(!api&&!['write','upload','file','html','archive'].includes(method))return original(req,res);
-    if(api&&method!=='session.cwd'&&!method.startsWith('fs.'))return original(req,res);
+    if(!api&&!['write','upload','file','html','archive'].includes(method))return original(req,res,peer);
+    if(api&&method!=='session.cwd'&&!method.startsWith('fs.'))return original(req,res,peer);
     const rejection=this.ctx.connection.requestRejection(req);
     if(rejection){json(res,rejection,{ok:false,error:{code:'forbidden',message:'请求未通过 DSH 认证'}});return;}
     const controller=new AbortController(), close=()=>{if(!res.writableEnded)controller.abort();};res.once('close',close);
@@ -70,7 +70,7 @@ export class SidebarAdapter {
         try{input=JSON.parse(raw.toString('utf8')||'{}');}catch{throw new SshError('无效 JSON','bad-request');}
         if(!input||typeof input!=='object'||Array.isArray(input))throw new SshError('无效请求','bad-request');
       }else input=Object.fromEntries(url.searchParams);
-      const scope=this.session(input.sessionId);if(!scope)return await original(req,res);
+      const scope=this.session(input.sessionId);if(!scope)return await original(req,res,peer);
       if(method==='write'||method==='upload'){
         if(req.method!=='POST')throw new SshError('method not allowed','method-error',null,405);
         raw=await body(req,8*1024*1024);
@@ -95,15 +95,42 @@ export function installSidebarAdapter(ctx,mounts){
   // with the original server, and local sessions retain the original handler.
   ctx.inject(['webServer'],scope=>{
     const server=scope.webServer, descriptor=Object.getOwnPropertyDescriptor(server,'match'), original=server.match.bind(server), adapter=new SidebarAdapter(scope,mounts);
-    const replacement=pathname=>{const route=original(pathname);return route&&pathname.startsWith('/sidebar/')?{...route,handler:(req,res)=>adapter.handle(req,res,route.handler)}:route;};
+    const connection=scope.connection, admitted=new WeakMap();
+    const legacy=typeof connection.requestRejection==='function';
+    const fence=req=>{
+      const peer=admitted.get(req);
+      return peer?.signal && !peer.signal.aborted ? undefined : 403;
+    };
+    if(!legacy){
+      const previous=Object.getOwnPropertyDescriptor(connection,'requestRejection');
+      Object.defineProperty(connection,'requestRejection',{value:fence,configurable:true,writable:true});
+      scope.effect(()=>()=>{
+        if(Object.getOwnPropertyDescriptor(connection,'requestRejection')?.value!==fence)return;
+        if(previous)Object.defineProperty(connection,'requestRejection',previous);
+        else delete connection.requestRejection;
+      });
+    }
+    const withAdmission=async(req,peer,handler)=>{
+      if(!legacy && peer)admitted.set(req,peer);
+      try{return await handler();}
+      finally{admitted.delete(req);}
+    };
+    const replacement=pathname=>{
+      const route=original(pathname);
+      return route&&pathname.startsWith('/sidebar/')&&typeof route.handler==='function'
+        ? {...route,handler:(req,res,peer)=>withAdmission(req,peer,()=>adapter.handle(req,res,route.handler,peer))}
+        : route;
+    };
     server.match=replacement;
     scope.effect(()=>()=>{if(Object.getOwnPropertyDescriptor(server,'match')?.value===replacement){if(descriptor)Object.defineProperty(server,'match',descriptor);else delete server.match;}});
     const sockets=new WebSocketServer({noServer:true,maxPayload:16384});
     const wrap=route=>{
-      if(route.path!=='/sidebar/ws/fs-watch')return route;
-      return {...route,handler:(req,socket,head)=>{
+      const watch=route.path==='/sidebar/ws/fs-watch';
+      if(!watch&&(legacy||!route.path.startsWith('/sidebar/')))return route;
+      return {...route,handler:(req,socket,head,peer)=>withAdmission(req,peer,()=>{
+        if(!watch)return route.handler(req,socket,head,peer);
         const url=new URL(req.url||'/','http://dsh.internal'), session=adapter.session(url.searchParams.get('sessionId'));
-        if(!session)return route.handler(req,socket,head);
+        if(!session)return route.handler(req,socket,head,peer);
         if(scope.connection.requestRejection(req)!==undefined){socket.destroy();return;}
         sockets.handleUpgrade(req,socket,head,ws=>{
           const watched=new Map(), pendingPaths=new Map(), control=new AbortController();let timer,closed=false,polling=false;
@@ -134,14 +161,18 @@ export function installSidebarAdapter(ctx,mounts){
           timer=setInterval(poll,2500);timer.unref();
           ws.once('close',()=>{closed=true;control.abort();clearInterval(timer);watched.clear();pendingPaths.clear();});
         });
-      }};
+      })};
     };
     const ownUpgrade=Object.getOwnPropertyDescriptor(server,'registerUpgrade'), register=server.registerUpgrade.bind(server), replacementUpgrade=route=>register(wrap(route));
     server.registerUpgrade=replacementUpgrade;
-    const existing=server.upgrades?.get('/sidebar/ws/fs-watch'), upgraded=existing&&wrap(existing);if(upgraded)server.upgrades.set(existing.path,upgraded);
+    const existingUpgrades=[];
+    for(const [path,existing] of server.upgrades||[]){
+      const upgraded=wrap(existing);
+      if(upgraded!==existing){existingUpgrades.push({path,existing,upgraded});server.upgrades.set(path,upgraded);}
+    }
     scope.effect(()=>()=>{
       for(const ws of sockets.clients)ws.terminate();sockets.close();
-      if(existing&&server.upgrades.get(existing.path)===upgraded)server.upgrades.set(existing.path,existing);
+      for(const {path,existing,upgraded} of existingUpgrades)if(server.upgrades.get(path)===upgraded)server.upgrades.set(path,existing);
       if(Object.getOwnPropertyDescriptor(server,'registerUpgrade')?.value===replacementUpgrade){if(ownUpgrade)Object.defineProperty(server,'registerUpgrade',ownUpgrade);else delete server.registerUpgrade;}
     });
   });

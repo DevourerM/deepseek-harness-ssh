@@ -24,6 +24,43 @@ test('file compatibility routes authenticate before consuming bodies or contacti
   const req={url:'/sidebar/api/fs.tree',method:'POST',[Symbol.asyncIterator](){assert.fail('must not consume rejected request');}};
   const res=new Response();await adapter.handle(req,res,()=>assert.fail('must not call original'));assert.equal(res.status,403);
 });
+test('Host admission peer authenticates Files routes without the legacy connection method',async()=>{
+  const connection={};
+  const record={id:'r',remoteRoot:'/srv/project',localRoot:'identity'};
+  const cleanups=[];
+  const original=(req,res,peer)=>{
+    assert.equal(peer.principal.kind,'owner');
+    assert.equal(connection.requestRejection(req),undefined);
+    res.end('original');
+  };
+  const route={auth:'required',handler:original};
+  const webServer={match:()=>route,registerUpgrade(){},upgrades:new Map()};
+  const ctx={connection,sessions:{get:id=>({id,header:{cwd:id==='remote'?'identity':'local'}})},
+    workingDirectory:{get:()=>'/srv/project'},sandboxPolicy:{resolve:()=>({mode:'read-only'})},
+    inject:(_keys,fn)=>fn({...ctx,webServer,effect:fn=>cleanups.push(fn())})};
+  let remoteCalls=0;
+  installSidebarAdapter(ctx,{scope:{run:(_record,fn)=>fn()},byPath:path=>path==='identity'?record:null,
+    route:(path,cwd)=>({record,path:path||cwd}),request:async()=>{remoteCalls++;return {entries:[]};}});
+  const lifetime=new AbortController();
+  const peer={signal:lifetime.signal,principal:{kind:'owner'}};
+  const invoke=async(id,admission)=>{
+    const req=Readable.from([Buffer.from(JSON.stringify({sessionId:id}))]);
+    req.url='/sidebar/api/fs.tree';req.method='POST';const res=new Response();
+    const wrapped=webServer.match('/sidebar/api/fs.tree');
+    assert.equal(wrapped.auth,'required');
+    await wrapped.handler(req,res,admission);
+    assert.equal(connection.requestRejection(req),403);
+    return res;
+  };
+  assert.equal((await invoke('remote')).status,403);
+  assert.equal((await invoke('remote',peer)).status,200);
+  assert.equal((await invoke('local',peer)).value,'original');
+  lifetime.abort();
+  assert.equal((await invoke('remote',peer)).status,403);
+  assert.equal(remoteCalls,1);
+  cleanups.reverse().forEach(fn=>fn());
+  assert.equal(connection.requestRejection,undefined);
+});
 test('symlink directory listings are returned under the path the Files UI requested',async()=>{
   const record={id:'r',remoteRoot:'/srv/project',localRoot:'identity'};
   const resolved='/srv/project/real/job';
@@ -44,7 +81,7 @@ test('file backend derives host, root, cwd and permission from the session rathe
 test('file compatibility restores route and websocket hooks when the plugin unloads',()=>{
   const originalWatch={path:'/sidebar/ws/fs-watch',handler(){}};
   const server={match:()=>undefined,registerUpgrade(){},upgrades:new Map([[originalWatch.path,originalWatch]])},match=server.match,register=server.registerUpgrade,cleanup=[];
-  const ctx={inject:(_keys,fn)=>fn({...ctx,webServer:server,effect:fn=>cleanup.push(fn())})};
+  const ctx={connection:{requestRejection:()=>undefined},inject:(_keys,fn)=>fn({...ctx,webServer:server,effect:fn=>cleanup.push(fn())})};
   installSidebarAdapter(ctx,{});assert.notEqual(server.match,match);assert.notEqual(server.upgrades.get(originalWatch.path),originalWatch);
   cleanup.reverse().forEach(fn=>fn());assert.equal(server.match,match);assert.equal(server.registerUpgrade,register);assert.equal(server.upgrades.get(originalWatch.path),originalWatch);
 });
@@ -53,11 +90,12 @@ test('collapsed directories cancel pending SSH watches and duplicate watches do 
   const record={id:'r',remoteRoot:'/srv/project',localRoot:'identity'}, requests=[],cleanup=[];
   const original={path:'/sidebar/ws/fs-watch',handler(){assert.fail('remote watch must use SSH adapter');}};
   const webServer={match:()=>undefined,registerUpgrade(){},upgrades:new Map([[original.path,original]])};
-  const ctx={sessions:{get:()=>({id:'s',header:{cwd:'identity'}})},connection:{requestRejection:()=>undefined},workingDirectory:{get:()=>'/srv/project'},sandboxPolicy:{resolve:()=>({mode:'read-only'})},
+  const ctx={sessions:{get:()=>({id:'s',header:{cwd:'identity'}})},connection:{},workingDirectory:{get:()=>'/srv/project'},sandboxPolicy:{resolve:()=>({mode:'read-only'})},
     inject:(_keys,fn)=>fn({...ctx,webServer,effect:fn=>cleanup.push(fn())})};
   const mounts={scope:{run:(_record,fn)=>fn()},byPath:()=>record,route:path=>({record,path}),request:(_record,query,signal)=>{const deferred=Promise.withResolvers();requests.push({...deferred,signal,query});return deferred.promise;}};
   installSidebarAdapter(ctx,mounts);
-  const server=createServer();server.on('upgrade',(req,socket,head)=>webServer.upgrades.get(original.path).handler(req,socket,head));
+  const lifetime=new AbortController();
+  const server=createServer();server.on('upgrade',(req,socket,head)=>webServer.upgrades.get(original.path).handler(req,socket,head,{signal:lifetime.signal}));
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   let ws;
   t.after(async()=>{ws?.terminate();cleanup.reverse().forEach(fn=>fn());await new Promise(resolve=>server.close(resolve));});
