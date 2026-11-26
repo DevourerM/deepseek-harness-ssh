@@ -28,7 +28,10 @@ export function installSubagentAdapter(ctx, mounts) {
 
   ctx.inject(['subagents'], scope => {
     const undo = patch(scope.subagents, 'startActivation', original => async spec => {
-      const {request} = spec, record = mounts.forAgent(request.parent);
+      // Older hosts nest the delegation fields under request. Newer hosts
+      // pass the parent, cwd and other activation fields at the top level.
+      const request = spec.parent ? spec : spec.request;
+      const record = mounts.forAgent(request?.parent);
       if (!record) return original(spec);
       // Do not await before native admission: it acquires the parent's ownership
       // hold, which keeps a finishing parent alive during child initialization.
@@ -39,7 +42,8 @@ export function installSubagentAdapter(ctx, mounts) {
       spec.signal?.throwIfAborted();
       // Exit any enclosing tool scope so the spawned child's turn loop does not
       // inherit the parent tool's AsyncLocalStorage store during preStep.
-      return mounts.scope.run(undefined, () => original({...spec, request: {...request, cwd: route.path}}));
+      const routed = {...request, cwd: route.path};
+      return mounts.scope.run(undefined, () => original(request === spec ? routed : {...spec, request: routed}));
     });
     scope.effect(() => undo);
   });

@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {Mounts} from '../src/host/mounts.js';
 import {installSubagentAdapter} from '../src/host/subagents.js';
 
-function fixture() {
+function fixture({flat = false} = {}) {
   const mounts = new Mounts({});
   const record = {id: 'one', localRoot: join(tmpdir(), 'ssh-child-one'), remoteRoot: '/srv/项目 空格'};
   const other = {id: 'two', localRoot: join(tmpdir(), 'ssh-child-two'), remoteRoot: '/srv/two'};
@@ -20,10 +20,11 @@ function fixture() {
     },
     subagents: {async startActivation(spec) {
       calls.push(spec);
+      const request = flat ? spec : spec.request;
       // Reproduce the real host's Windows cwd resolution, even on Linux CI.
-      const cwd = spec.request.cwd !== undefined && win32.isAbsolute(spec.request.cwd)
-        ? spec.request.cwd : win32.resolve(await ctx.workingDirectory.ensure(spec.request.parent), spec.request.cwd ?? '.');
-      const child = {session: {header: {...spec.request.parent.session.header}}};
+      const cwd = request.cwd !== undefined && win32.isAbsolute(request.cwd)
+        ? request.cwd : win32.resolve(await ctx.workingDirectory.ensure(request.parent), request.cwd ?? '.');
+      const child = {session: {header: {...request.parent.session.header}}};
       await ctx.workingDirectory.set(child, cwd);
       return {child, cwd};
     }},
@@ -31,9 +32,28 @@ function fixture() {
   };
   const original = ctx.subagents.startActivation, originalSet = ctx.workingDirectory.set;
   const undo = installSubagentAdapter(ctx, mounts);
-  return {mounts, record, other, parent, calls, ctx, original, originalSet, undo, cleanup,
-    start: (cwd, selected = parent) => ctx.subagents.startActivation({provider: 'spawn', delivery: 'parent', signal: new AbortController().signal, request: {parent: selected, ...(cwd === undefined ? {} : {cwd})}})};
+  const spec = request => ({provider: 'spawn', delivery: 'parent', signal: new AbortController().signal, ...(flat ? request : {request})});
+  return {mounts, record, other, parent, calls, ctx, original, originalSet, undo, cleanup, spec,
+    start: (cwd, selected = parent) => ctx.subagents.startActivation(spec({parent: selected, ...(cwd === undefined ? {} : {cwd})}))};
 }
+
+test('flat native activations retain team delivery, lineage, cancellation and host isolation', async () => {
+  const f = fixture({flat: true});
+  try {
+    const signal = new AbortController().signal;
+    const spec = {...f.spec({parent: f.parent, cwd: '../team'}), provider: 'fork', name: 'reviewer', childId: 'reserved', signal};
+    f.parent.session.current = f.record.remoteRoot + '/sub';
+    const {child} = await f.mounts.scope.run(f.record, () => f.ctx.subagents.startActivation(spec));
+    assert.deepEqual(f.calls[0], {...spec, cwd: f.record.remoteRoot + '/team'});
+    assert.equal((await f.start('nested', child)).cwd, f.record.remoteRoot + '/team/nested');
+    await assert.rejects(() => f.start(f.other.localRoot), {code: 'FS_SANDBOX_DENIED'});
+    await assert.rejects(() => f.ctx.subagents.startActivation({...spec, signal: AbortSignal.abort()}), {name: 'AbortError'});
+    assert.equal(f.calls.length, 2);
+    const local = f.spec({parent: {session: {header: {cwd: tmpdir()}}}, cwd: 'C:\\local'});
+    await f.ctx.subagents.startActivation(local);
+    assert.equal(f.calls.at(-1), local);
+  } finally { f.undo(); }
+});
 
 test('Windows native delegation receives POSIX cwd for default, relative, explicit and nested children', async () => {
   const f = fixture();

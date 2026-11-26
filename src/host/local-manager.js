@@ -6,7 +6,7 @@ export class LocalManager extends Jobs {
   constructor(store, ctx) { super(); this.store = store; this.mounts = new Mounts(store, ctx); this.ssh = this.mounts.ssh; this.workspaceConfig = new WorkspaceConfig(this.mounts); }
   config(workspaceId) { return this.workspaceConfig.get(workspaceId); }
   updateWorkspace(input, signal, options) { return this.workspaceConfig.update(input, signal, options); }
-  init() { return this.mounts.init(); }
+  init(directoryEvent) { return this.mounts.init(directoryEvent); }
   check(...args) { return this.mounts.check(...args); }
   browse(...args) { return this.mounts.browse(...args); }
   open(...args) { return this.mounts.open(...args); }

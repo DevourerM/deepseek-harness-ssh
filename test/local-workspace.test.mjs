@@ -23,6 +23,8 @@ test('SSH routing isolates local paths, concurrent sessions, and changed POSIX d
   })));
   assert.equal(mounts.route('x'), null);
   assert.throws(()=>mounts.scope.run(a,()=>mounts.route('C:\\outside\\file.txt')),{code:'FS_SANDBOX_DENIED'});
+  assert.throws(()=>mounts.scope.run(a,()=>mounts.route(join(b.localRoot,'file.txt'),a.localRoot)),{code:'FS_SANDBOX_DENIED'});
+  assert.throws(()=>mounts.scope.run(a,()=>mounts.route('file.txt',b.localRoot)),{code:'FS_SANDBOX_DENIED'});
 });
 test('restored SSH workspaces repair generated identity titles and preserve custom names',async()=>{
   const root=await mkdtemp(join(tmpdir(),'ssh-title-')), record={id:'0123456789abcdef01234567',alias:'server',remoteRoot:'/srv/project',localRoot:join(root,'identity'),workspaceId:'workspace'};
@@ -41,6 +43,9 @@ test('filesystem adapter leaves local calls alone and restores services on unloa
   for(const name of ['resolve','lstat','stat','readText','streamText','readBytes','readByteRange','listDir','writeText','editText','watch','processPath','fileUrl','contains']) fs[name] = () => 'local';
   const original=fs.resolve, undo=installFileSystem({fs},mounts,remote);
   assert.equal(fs.resolve('outside', {cwd:tmpdir()}), 'local');
+  assert.equal(fs.resolve(record.localRoot), 'local', 'session headers keep the native workspace identity');
+  const scopedRoot = await mounts.scope.run(record, () => fs.resolve(record.localRoot));
+  assert.equal(fs.processPath(scopedRoot), record.remoteRoot);
   const target=await fs.resolve('中文 #.txt',{cwd:record.localRoot});
   assert.equal(fs.processPath(target),'/srv/one/中文 #.txt');
   assert.equal(fs.fileUrl(target),'file:///srv/one/%E4%B8%AD%E6%96%87%20%23.txt');

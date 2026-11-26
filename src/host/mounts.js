@@ -23,11 +23,11 @@ export class Mounts {
   touch(record) { if (record?.id) this.recent = [record.id, ...this.recent.filter(id => id !== record.id)]; }
   serial(fn) { const result = this.tail.then(() => { if (this.disposed) throw new SshError('SSH 工作区已停止', 'DISPOSED'); return fn(); }); this.tail = result.catch(() => {}); return result; }
   persist(records = this.records) { return atomicWrite(join(this.store.root, 'mounts.json'), JSON.stringify(records, null, 2) + '\n'); }
-  async init() {
+  async init(directoryEvent = 'working-directory/change') {
     await this.initRecords();
-    this.installDirectoryReset();
+    this.installDirectoryReset(directoryEvent);
   }
-  installDirectoryReset() {
+  installDirectoryReset(directoryEvent) {
     const service = this.ctx.workingDirectory;
     if (this.removeDirectoryReset || !service?.get || !this.ctx.on) return;
     const descriptor = Object.getOwnPropertyDescriptor(service, 'get'), original = service.get.bind(service);
@@ -41,7 +41,7 @@ export class Mounts {
       // Model/tool admission runs outside the mutation queue. Wait for queued
       // edits before inspecting pending resets, then enqueue reset persistence.
       await this.tail;
-      await this.resetDirectory(session);
+      await this.resetDirectory(session, directoryEvent);
     };
     const removers = [
       this.ctx.on('agent/pre-step', async ({agent}, next) => { await reset(agent.session); return next(); }, {prepend: true}),
@@ -56,14 +56,14 @@ export class Mounts {
       this.removeDirectoryReset = undefined;
     };
   }
-  resetDirectory(session) {
+  resetDirectory(session, directoryEvent) {
     const record = this.byPath(session.header.cwd);
     if (!record?.cwdResetSessions?.includes(session.id)) return Promise.resolve();
     return this.serial(async () => {
       if (!record.cwdResetSessions?.includes(session.id)) return;
       // The durable pending set also covers histories restored after restart.
       // Append through Session's public event API before allowing model work.
-      session.append('working-directory/change', {cwd: record.localRoot});
+      session.append(directoryEvent, {cwd: record.localRoot});
       const flushed = await this.ctx.sessions?.flush?.(session);
       if (!flushed) throw new SshError('工作区目录变更正在等待会话持久化，请恢复会话存储后重试', 'WORKSPACE_CWD_PENDING', {sessionId: session.id}, 503);
       const next = {...record, cwdResetSessions: record.cwdResetSessions.filter(id => id !== session.id)};
@@ -86,7 +86,11 @@ export class Mounts {
   forAgent(agent) { return agent ? this.byPath(agent.session.header.cwd) : null; }
   route(path, cwd) {
     const explicit = this.byPath(path), base = this.byPath(cwd);
-    const record = explicit || base || this.scope.getStore(); if (!record) return null;
+    const scoped = this.scope.getStore();
+    if (scoped && (explicit && explicit !== scoped || base && base !== scoped)) {
+      throw new SshError('路径不属于当前 SSH 工作区', 'FS_SANDBOX_DENIED');
+    }
+    const record = scoped || explicit || base; if (!record) return null;
     let normalized = typeof path === 'string' ? path : '';
     if (win32.isAbsolute(normalized) && /^[a-z]:|^\\\\/i.test(normalized) && !explicit) {
       const candidate = /^[a-z]:[\\/]/i.test(normalized) ? posix.normalize(normalized.slice(2).replaceAll('\\', '/')) : '';
